@@ -1,0 +1,324 @@
+from pyomo.environ import *
+import numpy as np
+import pandas as pd
+from Query import Query
+import main
+from pathlib import Path
+import argparse
+import yaml
+from datetime import datetime, timezone
+from datetime import timedelta
+from RemoteLogger import RemoteLogger
+import Util
+
+# #################### read and validate input ###########################
+    
+#CONFIG_PATH = "app/config.yaml"
+#MAIN_SCRIPT = "app/main.py"
+
+logger = RemoteLogger(log_file='query.log')
+
+start_time = datetime.now(timezone.utc)
+
+logger.log(f"A5Runner start: {start_time}", level="info")
+
+# create parser
+parser = argparse.ArgumentParser(description="Run A5 with config file")
+parser.add_argument("-c", "--config", required=True, help="Path to config YAML file")
+
+# Read arguments
+args = parser.parse_args()
+
+# Open and read config-file
+with open(args.config, "r") as f:
+    data = yaml.safe_load(f)
+    
+interval = data["params"]["interval"]
+
+np = [{"time": r["time"], "value": r["value"]} for r in main.get_last_prognosis_readings(data["params"]["npPriceIdentifier"])] # elering
+prod = [{"time": r["time"], "value": r["value"]} for r in main.get_last_prognosis_readings(data["params"]["productionPrognosisIdentifier"])] # production prognosis
+cons = [{"time": r["time"], "value": r["value"]} for r in main.get_last_prognosis_readings(data["params"]["consumptionPrognosisIdentifier"])] # consumption prognosis
+########################################################################
+
+logger.log(f"np: {np}", level="info")
+logger.log(f"prod: {prod}", level="info")
+logger.log(f"cons: {cons}", level="info")
+logger.log(f"len(prod): {len(prod)}", level="info")
+logger.log(f"len(cons): {len(cons)}", level="info")
+logger.log(f"len(np): {len(np)}", level="info")
+########################################################################
+
+ESS_kW = main.get_datapoint(data["params"]["ess_max_P_dp_id"])[0]["lastReadingValue"] # salvesti võimsus - ess_max_P.last_reading
+ESS_kWh = main.get_datapoint(data["params"]["ess_charge_dp_id"])[0]["lastReadingValue"] # salvesti efektiivne laetus optimeerimise alguses kWh-des (võib olla negatiivne) - ess_charge.last_reading
+ESS_max_kWh = main.get_datapoint(data["params"]["ess_max_E_dp_id"])[0]["lastReadingValue"] # salvesti absoluutne mahutavus - ess_max_E.last_reading
+P_imp_lim_kW = data["params"]["pccImportLimitW"]  # main.get_datapoint("pccImportLimitW")[0]["lastReadingValue"] # pcc max tarbimine - pccImportLimitW
+P_exp_lim_kW = data["params"]["pccExportLimitW"] # main.get_datapoint("pccExportLimitW")[0]["lastReadingValue"] # pcc max müük/tootlus (negatiivne) - pccExportLimitW
+ESS_SOC_min = data["params"]["ess_min_soc"] # main.get_datapoint("essMinSoc")[0]["lastReadingValue"] # within safe limits - essMinSoc
+ESS_SOC_max = data["params"]["ess_max_soc"] # main.get_datapoint("essMaxSoc")[0]["lastReadingValue"] # - essMaxSoc
+ESS_safe_min = main.get_datapoint(data["params"]["essMinSafeLim"])[0]["lastReadingValue"] # - ess_min_batt_safe_lim.last_reading
+ESS_END_kWh = main.get_datapoint(data["params"]["ess_charge_dp_id"])[0]["lastReadingValue"] # salvesti efektiivne laetus optimeerimise lõpus kWh-des - ess_charge.last_reading
+kW_to_kWh = interval / 3600 # kordaja võimsuse teisendamiseks energiaks (intervallist tulenev)
+current_dp_id = data["params"]["essCurrentPowerPlanIdentifier"]
+result_dp_id = main.get_datapoint(data["params"]["essResultPowerPlanIdentifier"])[0]["id"]
+########################################################################
+print("=========================")
+print(f"ESS_kW -- ,{ESS_kW}!")
+print(f"ESS_kWh -- ,{ESS_kWh}!")
+print(f"ESS_max_kWh -- ,{ESS_max_kWh}!")
+print(f"P_imp_lim_kW -- ,{P_imp_lim_kW}!")
+print(f"P_exp_lim_kW -- ,{P_exp_lim_kW}!")
+print(f"ESS_SOC_min -- ,{ESS_SOC_min}!")
+print(f"ESS_SOC_max -- ,{ESS_SOC_max}!")
+print(f"ESS_safe_min -- ,{ESS_safe_min}!")
+print(f"ESS_END_kWh -- ,{ESS_END_kWh}!")
+print(f"kW_to_kWh -- ,{kW_to_kWh}!")
+print(f"interval -- ,{interval}!")
+print(f"current_dp_id -- ,{current_dp_id}!")
+print(f"result_dp_id -- ,{result_dp_id}!")
+########################################################################
+
+ESS_eff_kWh = (ESS_max_kWh*(ESS_SOC_max - ESS_SOC_min)/100) # Salvesti efektiivne mahutavus
+ESS_SOC_0 = (ESS_max_kWh*ESS_SOC_min/100 + ESS_kWh)/ESS_max_kWh*100
+ESS_SOC_END = (ESS_END_kWh/ESS_eff_kWh + ESS_safe_min)*100
+ESS_SOC_END = (ESS_max_kWh*ESS_SOC_min/100 + ESS_END_kWh)/ESS_max_kWh*100
+ESS_SOC_0 = 0 if ESS_SOC_0 < 0 else ESS_SOC_0
+ESS_SOC_0 = 100 if ESS_SOC_0 > 100 else ESS_SOC_0
+ESS_SOC_END = ESS_SOC_min if ESS_SOC_END < ESS_SOC_min else ESS_SOC_END
+ESS_SOC_END = ESS_SOC_max if ESS_SOC_END > ESS_SOC_max else ESS_SOC_END
+
+########################################################################
+print("=========================")
+print(f"ESS_eff_kWh -- ,{ESS_eff_kWh}!")
+print(f"ESS_SOC_0 -- ,{ESS_SOC_0}!")
+print(f"ESS_SOC_END -- ,{ESS_SOC_END}!")
+########################################################################
+
+def model_to_df(m):
+    st = 0
+    en = len(m.T)
+
+    periods = range(st, en)
+    print(f"periods: , {len(periods)}")
+    load = [value(m.P_kW[i]) for i in periods]
+    pv = [value(m.PV_kW[i]) for i in periods]
+    pcc_export = [value(m.PCC_EXPORT_kW[i]) for i in periods]
+    pcc_import_kW = [value(m.PCC_IMPORT_kW[i]) for i in periods]
+    ess = [value(m.ESS_kW[i]) for i in periods]
+    ess_soc = [value(m.ESS_SoC[i]) for i in periods]
+    pcc = [value(m.PCC_IMPORT_kW[i])-value(m.PCC_EXPORT_kW[i]) for i in periods]
+    spot = [value(m.SPOT_EUR_kWh[i]) for i in periods]
+
+    df_dict = {
+        'Period': periods,
+        'Load': load,
+        'PV': pv,
+        'ESS': ess,
+        'ESS effective SoC': ess_soc,
+        'PCC Export': pcc_export,
+        'PCC Import': pcc_import_kW,
+        'PCC': pcc,
+        'Spot Price': spot
+    }
+
+    df = pd.DataFrame(df_dict)
+
+    return df
+
+count = Util.calculate_count(np, start_time, interval)
+initial = main.get_datapoint(data["params"]["npPriceIdentifier"])[0]["lastReadingValue"]
+
+np_extracted = Util.generate_result_series(np, start_time, interval, int(count), initial)
+#print(f"np_extracted --- ", np_extracted)
+cons_extracted = Util.extract_prognosis_values(cons, "consumption", cons[0]["time"], interval, int(count))
+#print(f"cons_extracted --- ", cons_extracted)
+prod_extracted = Util.extract_prognosis_values(prod, "production", prod[0]["time"], interval, int(count))
+#print(f"prod_extracted --- ", prod_extracted)
+
+assert len(prod_extracted) == len(cons_extracted), "len(prod_extracted) != len(cons_extracted)"
+assert len(prod_extracted) == len(np_extracted), "len(prod) != len(np_extracted)"
+
+logger.log(f"len(prod_extracted): {len(prod_extracted)}", level="info")
+logger.log(f"len(cons_extracted): {len(cons_extracted)}", level="info")
+logger.log(f"len(np_extracted): {len(np_extracted)}", level="info")
+
+data = pd.DataFrame({
+    'Load': cons_extracted,
+    'PV': prod_extracted,
+    'Spot': np_extracted,
+})
+
+# *************************
+# Build Model
+#**************************
+m = ConcreteModel()
+
+# Fixed Parameters
+m.T = Set(initialize=data.index.tolist(), doc='Indexes', ordered=True)
+m.P_kW = Param(m.T, initialize=data.Load, doc='Load [kW]', within=Any)
+m.PV_kW = Param(m.T, initialize=data.PV, doc='PV generation [kW]', within=Any)
+m.SPOT_EUR_kWh = Param(m.T, initialize=data.Spot, doc='Spot Market Price [€/kWh]', within=Any)
+
+# Variable Parameters
+m.PCC_exp_z = Var(m.T, bounds=(0,1), within=NonNegativeIntegers)
+m.PCC_imp_z = Var(m.T, bounds=(0,1), within=NonNegativeIntegers)
+m.PCC_EXPORT_kW = Var(m.T, within=NonNegativeReals)
+m.PCC_IMPORT_kW = Var(m.T, within=NonNegativeReals)
+m.ESS_kW = Var(m.T, bounds=(-ESS_kW, ESS_kW), doc='ESS P [kW]')
+m.ESS_kW_charge = Var(m.T, within=NonNegativeReals, doc='ESS P charge [kW]')
+m.ESS_kW_discharge = Var(m.T, within=NonNegativeReals, doc='ESS P discharge [kW]')
+m.ESS_kW_charge_z = Var(m.T, bounds=(0,1), within=NonNegativeIntegers)
+m.ESS_kW_discharge_z = Var(m.T, bounds=(0,1), within=NonNegativeIntegers)
+m.ESS_SoC = Var(m.T, bounds=(0, 100), initialize=ESS_SOC_0, doc='ESS effective SoC [%]',  within=NonNegativeReals)
+
+# Rules
+def sim_import_export_restrict_rule(m, t):
+    "Prohibit simultaneous PCC export and import"
+    return m.PCC_exp_z[t] + m.PCC_imp_z[t] <= 1
+
+m.sim_import_export_restrict = Constraint(m.T, rule=sim_import_export_restrict_rule)
+
+def pcc_export_kW_rule(m, t):
+    "PCC export calculation"
+    return m.PCC_EXPORT_kW[t] <= -P_exp_lim_kW*m.PCC_exp_z[t]
+
+m.pcc_export = Constraint(m.T, rule=pcc_export_kW_rule)
+
+def pcc_import_kW_rule(m, t):
+    "PCC import calculation"
+    return m.PCC_IMPORT_kW[t] <= P_imp_lim_kW*m.PCC_imp_z[t]
+
+m.pcc_import_kW = Constraint(m.T, rule=pcc_import_kW_rule)
+
+def sim_charge_discharge_restrict_rule(m, t):
+    "Prohibit ESS simultaneous charging and discharging"
+    return m.ESS_kW_charge_z[t] + m.ESS_kW_discharge_z[t] <= 1
+
+m.sim_charge_discharge_restrict = Constraint(m.T, rule=sim_charge_discharge_restrict_rule)
+
+def ESS_kW_charge_rule(m, t):
+    "ESS charge kW Calculation"
+    return m.ESS_kW_charge[t] <= ESS_kW*m.ESS_kW_charge_z[t]
+
+m.ESS_kW_charging = Constraint(m.T, rule=ESS_kW_charge_rule)
+
+def ESS_kW_discharge_rule(m, t):
+    "ESS discharge kW Calculation"
+    return m.ESS_kW_discharge[t] <= ESS_kW*m.ESS_kW_discharge_z[t]
+
+m.ESS_kW_discharging = Constraint(m.T, rule=ESS_kW_discharge_rule)
+
+def ESS_kW_calc_rule(m, t):
+    "ESS kW Calculation"
+    return m.ESS_kW[t] == m.ESS_kW_charge[t] - m.ESS_kW_discharge[t]
+
+m.ESS_kW_calculation = Constraint(m.T, rule=ESS_kW_calc_rule)
+
+def ess_SoC_rule(m, t):
+    "ESS SOC Calculation"
+    if t >= 1:
+        return m.ESS_SoC[t] == m.ESS_SoC[t-1] + ((m.ESS_kW[t-1]*kW_to_kWh)/ESS_eff_kWh)*100
+    else:
+        return m.ESS_SoC[t] == ESS_SOC_0
+
+m.ess_SoC_const = Constraint(m.T, rule=ess_SoC_rule)
+
+def soc_end_target_rule(m):
+    "End SoC value"
+    return m.ESS_SoC[len(m.ESS_SoC)-1] + ((m.ESS_kW[len(m.ESS_SoC)-1]*kW_to_kWh)/ESS_eff_kWh)*100 == ESS_SOC_END
+
+m.soc_end_target = Constraint(rule=soc_end_target_rule)
+
+def pcc_self_consumption_rule(m, t):
+    return m.PCC_IMPORT_kW[t] - m.PCC_EXPORT_kW[t] == m.P_kW[t] + m.PV_kW[t] + m.ESS_kW[t]
+
+m.pcc_self_consumption = Constraint(m.T, rule=pcc_self_consumption_rule)
+
+# **********************
+# Cost function and optimization objective
+# **********************
+
+# Value constants
+ESS_DEG_COST = 0.05
+GRID_TARIFF_COMPONENT = 0.05
+
+# Cost function
+cost = sum(( (m.PCC_IMPORT_kW[t]/1000)*kW_to_kWh*(m.SPOT_EUR_kWh[t]/1000 + GRID_TARIFF_COMPONENT) - 
+            (m.PCC_EXPORT_kW[t]/1000)*kW_to_kWh*m.SPOT_EUR_kWh[t]/1000 + 
+            (m.ESS_kW_charge[t]/1000)*kW_to_kWh*ESS_DEG_COST ) for t in m.T) #
+m.objective = Objective(expr = cost, sense=minimize)
+
+# Solve
+solver = SolverFactory('glpk', options={'tmlim': 300})
+results = solver.solve(m)
+# print(f"results: {results}")
+results_path = Path(f"results_{start_time.strftime('%Y.%m.%d_%H.%M.%S')}.json").resolve()
+
+if (results.solver.status == SolverStatus.ok) and ((results.solver.termination_condition == TerminationCondition.optimal) or (results.solver.termination_condition == TerminationCondition.feasible)):
+    # Format results as data frame
+    results_df = model_to_df(m)
+    # print("results_df:")
+    # print(results_df)
+    
+    # Save to JSON
+    try:
+        results_df.to_json(results_path, orient="records", indent=2)
+        print(f"[INFO] Results saved to {results_path.resolve()}")
+        logger.log(f"[INFO] Results saved to {results_path.resolve()}", level="info")
+    except Exception as e:
+        print(f"[ERROR] Failed to save results to JSON: {e}")
+        logger.log(f"[ERROR] Failed to save results to JSON: {e}", level="error")
+
+    load = results_df["ESS"].values
+    print("ESS")
+    print(",".join(f"{x:.4g}" for x in load))
+
+#     #pcc_export = results_df["PCC Export"].values
+#     #print("Export")
+#     #print(",".join(f"{x:.4g}" for x in pcc_export))
+
+#     #print("Import")
+#     #pcc_import_kW = results_df["PCC Import"].values
+#     #print(",".join(f"{x:.4g}" for x in pcc_import_kW))
+
+
+
+#     #soc = results_df["ESS effective SoC"].values
+#     #print(",".join(f"{x:.4g}" for x in soc))
+#     #print("SoC")
+#     #print(",".join(f"{x:.4g}" for x in soc))
+
+print(len(results_df))
+
+if (len(results_df) == 0):
+    # Use old prognosis, if it exists
+    
+    logger.log(f"Optimization failed - empty result", level="error")
+    essPowerPrognosisRaw = [r["value"] for r in main.get_last_prognosis_readings(current_dp_id)]
+    print("essPowerPrognosisRaw")
+    print(essPowerPrognosisRaw)
+else:
+    # use optimized results
+    essPowerPrognosisRaw = results_df["ESS"].values    
+    
+essPowerPlanned =[]
+
+for i, value in enumerate(essPowerPrognosisRaw):
+    reading_time = start_time + timedelta(seconds=i * interval)  
+    essPowerPlanned.append({
+        "time": reading_time.isoformat().replace('+00:00', 'Z'),
+        "value": value
+    })
+
+# dp_pr = main.get_datapoint_prognosis(current_dp_id)
+
+# print("Serveri vastus:")
+# print(f"dp_pr", dp_pr)
+
+prognosis_payload = {
+    "datapointId": result_dp_id,
+    "time": start_time.isoformat().replace('+00:00', 'Z'),
+    "readings":essPowerPlanned
+}
+
+response = main.post_datapoint_prognosis(prognosis_payload)
+

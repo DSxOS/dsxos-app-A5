@@ -1,0 +1,20 @@
+
+cron: "10 */15 * * * *"
+logLevel: 4
+params:
+  apiEndpoint: "microgrids.localhost:8080"
+  ess_max_P_dp_id: "ess_max_P"
+  ess_charge_dp_id: "ess_charge"
+  ess_max_E_dp_id: "ess_max_E"
+  pccImportLimitW: 55000
+  pccExportLimitW: -1000000
+  ess_min_soc: 0
+  ess_max_soc: 100
+  essMinSafeLim: "ess_min_batt_safe_lim"
+  productionPrognosisIdentifier: "production_p_lt"
+  consumptionPrognosisIdentifier: "consumption_p_lt"
+  npPriceIdentifier: "elering_nps_price"
+  essCurrentPowerPlanIdentifier: "ess_p_lt_a5"
+  essResultPowerPlanIdentifier: "ess_p_lt_a5"
+  interval: 900
+  endTime_delta: 86400
