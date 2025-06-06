@@ -1,21 +1,18 @@
 from pyomo.environ import *
 import numpy as np
 import pandas as pd
-from Query import Query
+#from Query import Query
 import query_utils
 from pathlib import Path
 import argparse
 import yaml
 from datetime import datetime, timezone
 from datetime import timedelta
-from RemoteLogger import RemoteLogger
+#from RemoteLogger import RemoteLogger
 import Util
-import logging
-from loki_logger_handler import LokiHandler
+#import logging
+#from loki_logger_handler import LokiHandler
 from logger import setup_logger
-
-# url = "http://localhost:8080/api"
-# headers={"Authorization": "Bearer YOUR_TOKEN"}
 
 # create parser
 parser = argparse.ArgumentParser(description="Run A5 with config file")
@@ -32,40 +29,28 @@ api_headers = {"Authorization": api_token}
 # Initialize query_utils with URL + headers    
 query_utils.init(api_url, api_headers)
 
-# #################### read and validate input ###########################
+
     
 #CONFIG_PATH = "app/config.yaml"
 #MAIN_SCRIPT = "app/main.py"
 
 logger = setup_logger(
     log_file="query.log",
-    loki_url="http://localhost:3100/loki/api/v1/push",  # või sinu Loki aadress
-    loki_tags={"app": "A5Runner", "env": "dev"},        # lisa vajadusel siia rohkem täppe
+    loki_url="http://localhost:3100/loki/api/v1/push",  # Loki address
+    loki_tags={"app": "A5Runner", "env": "dev"},        # add more tags if needed
     level="INFO"
 )
-#logger = RemoteLogger(log_file='query.log')
-# logger = logging.getLogger("main")
-# logger.setLevel(logging.INFO)
+
 logger.info("A5Runner start")
 
 start_time = datetime.now(timezone.utc)
 
-#logger.log(f"A5Runner start: {start_time}", level="info")
-    
+##################### read and validate input ########################### 
 interval = data["params"]["interval"]
 
 np = [{"time": r["time"], "value": r["value"]} for r in query_utils.get_last_prognosis_readings(data["params"]["npPriceIdentifier"])] # elering
 prod = [{"time": r["time"], "value": r["value"]} for r in query_utils.get_last_prognosis_readings(data["params"]["productionPrognosisIdentifier"])] # production prognosis
 cons = [{"time": r["time"], "value": r["value"]} for r in query_utils.get_last_prognosis_readings(data["params"]["consumptionPrognosisIdentifier"])] # consumption prognosis
-########################################################################
-
-# logger.info(f"np: {np}")
-# logger.info(f"prod: {prod}")
-# logger.info(f"cons: {cons}")
-logger.info(f"len(prod): {len(prod)}")
-logger.info(f"len(cons): {len(cons)}")
-logger.info(f"len(np): {len(np)}")
-########################################################################
 
 ESS_kW = query_utils.get_datapoint(data["params"]["ess_max_P_dp_id"])[0]["lastReadingValue"] # salvesti võimsus - ess_max_P.last_reading
 ESS_kWh = query_utils.get_datapoint(data["params"]["ess_charge_dp_id"])[0]["lastReadingValue"] # salvesti efektiivne laetus optimeerimise alguses kWh-des (võib olla negatiivne) - ess_charge.last_reading
@@ -79,6 +64,12 @@ ESS_END_kWh = query_utils.get_datapoint(data["params"]["ess_charge_dp_id"])[0]["
 kW_to_kWh = interval / 3600 # kordaja võimsuse teisendamiseks energiaks (intervallist tulenev)
 current_dp_id = data["params"]["essCurrentPowerPlanIdentifier"]
 result_dp_id = query_utils.get_datapoint(data["params"]["essResultPowerPlanIdentifier"])[0]["id"]
+
+########################################################################
+logger.info(f"len(prod): {len(prod)}")
+logger.info(f"len(cons): {len(cons)}")
+logger.info(f"len(np): {len(np)}")
+########################################################################
 ########################################################################
 print("=========================")
 print(f"ESS_kW -- ,{ESS_kW}!")
@@ -147,18 +138,17 @@ count = Util.calculate_count(np, start_time, interval)
 initial = query_utils.get_datapoint(data["params"]["npPriceIdentifier"])[0]["lastReadingValue"]
 
 np_extracted = Util.generate_result_series(np, start_time, interval, int(count), initial)
-#print(f"np_extracted --- ", np_extracted)
 cons_extracted = Util.extract_prognosis_values(cons, "consumption", cons[0]["time"], interval, int(count))
-#print(f"cons_extracted --- ", cons_extracted)
 prod_extracted = Util.extract_prognosis_values(prod, "production", prod[0]["time"], interval, int(count))
-#print(f"prod_extracted --- ", prod_extracted)
 
 assert len(prod_extracted) == len(cons_extracted), "len(prod_extracted) != len(cons_extracted)"
 assert len(prod_extracted) == len(np_extracted), "len(prod) != len(np_extracted)"
 
+########################################################################
 logger.info(f"len(prod_extracted): {len(prod_extracted)}")
 logger.info(f"len(cons_extracted): {len(cons_extracted)}")
 logger.info(f"len(np_extracted): {len(np_extracted)}")
+########################################################################
 
 data = pd.DataFrame({
     'Load': cons_extracted,
@@ -269,25 +259,22 @@ m.objective = Objective(expr = cost, sense=minimize)
 # Solve
 solver = SolverFactory('glpk', options={'tmlim': 300})
 results = solver.solve(m)
-# print(f"results: {results}")
 results_path = Path(f"results_{start_time.strftime('%Y.%m.%d_%H.%M.%S')}.json").resolve()
 
 if (results.solver.status == SolverStatus.ok) and ((results.solver.termination_condition == TerminationCondition.optimal) or (results.solver.termination_condition == TerminationCondition.feasible)):
     # Format results as data frame
     results_df = model_to_df(m)
-    # print("results_df:")
-    # print(results_df)
     
-    # Save to JSON
-    try:
-        results_df.to_json(results_path, orient="records", indent=2)
-        logger.info(f"[INFO] Results saved to {results_path.resolve()}")
-    except Exception as e:
-        logger.error(f"[ERROR] Failed to save results to JSON: {e}")
+    # # Save to JSON
+    # try:
+    #     results_df.to_json(results_path, orient="records", indent=2)
+    #     logger.info(f"Results saved to {results_path.resolve()}")
+    # except Exception as e:
+    #     logger.error(f"Failed to save results to JSON: {e}")
 
-    load = results_df["ESS"].values
-    print("ESS")
-    print(",".join(f"{x:.4g}" for x in load))
+    # load = results_df["ESS"].values
+    # print("ESS")
+    # print(",".join(f"{x:.4g}" for x in load))
 
 #     #pcc_export = results_df["PCC Export"].values
 #     #print("Export")
@@ -304,19 +291,17 @@ if (results.solver.status == SolverStatus.ok) and ((results.solver.termination_c
 #     #print("SoC")
 #     #print(",".join(f"{x:.4g}" for x in soc))
 
-print(len(results_df))
 
 if (len(results_df) == 0):
     # Use old prognosis, if it exists
-    
-    logger.log(f"Optimization failed - empty result", level="error")
+    logger.warning(f"Optimization failed - empty result")
     essPowerPrognosisRaw = [r["value"] for r in query_utils.get_last_prognosis_readings(current_dp_id)]
-    print("essPowerPrognosisRaw")
-    print(essPowerPrognosisRaw)
+    # print("essPowerPrognosisRaw")
+    # print(essPowerPrognosisRaw)
 else:
     # use optimized results
     essPowerPrognosisRaw = results_df["ESS"].values    
-    
+
 essPowerPlanned =[]
 
 for i, value in enumerate(essPowerPrognosisRaw):
@@ -326,10 +311,6 @@ for i, value in enumerate(essPowerPrognosisRaw):
         "value": value
     })
 
-# dp_pr = main.get_datapoint_prognosis(current_dp_id)
-
-# print("Serveri vastus:")
-# print(f"dp_pr", dp_pr)
 
 prognosis_payload = {
     "datapointId": result_dp_id,
@@ -338,4 +319,5 @@ prognosis_payload = {
 }
 
 response = query_utils.post_datapoint_prognosis(prognosis_payload)
-
+logger.info(f"datapoint prognosis was posted: {response}")
+logger.info("A5Runner finished")

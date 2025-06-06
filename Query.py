@@ -1,8 +1,8 @@
 import requests
 import logging
-from logger import setup_logger
 
-logger = logging.getLogger("Query")
+
+logger = logging.getLogger("A5Runner")
 
 class Query:
     def __init__(self, base_url, headers=None, timeout=10):
@@ -12,7 +12,7 @@ class Query:
         self.params = {}
         self.timeout = timeout
         self.logger = logging.getLogger(__name__)
-        logger.info(f"Query initialized with base_url={base_url}")
+        #logger.info(f"Query initialized with base_url={base_url}")
 
     def post(self, endpoint, data=None, json=None):
         return self._request("POST", endpoint, data=data, json=json)
@@ -56,7 +56,7 @@ class Query:
 
     def _request(self, method, endpoint, **kwargs):
         url = f"{self.base_url}{endpoint}"
-        #print(f"Requesting: {method} {url}")  
+        
         try:
             response = requests.request(
                 method,
@@ -66,13 +66,13 @@ class Query:
                 **kwargs
             )
             response.raise_for_status()
-            #self.logger.info(f"{method} {url} – {response.status_code}")
+            #logger.info(f"{method} {url} – {response.status_code}")
             if response.content:
                 return response.json()
             return None
         except requests.HTTPError as e:
-            self.logger.error(f"{method} {url} – {response.status_code}")
-            self.logger.error(f"HTTP error: {e.response.status_code} {e.response.text}")
+            logger.error(f"{method} {url} – {response.status_code}")
+            logger.error(f"HTTP error: {e.response.status_code} {e.response.text}")
         except requests.RequestException as e:
-            self.logger.error(f"Request failed: {e}")
+            logger.error(f"Request failed: {e}")
         return None

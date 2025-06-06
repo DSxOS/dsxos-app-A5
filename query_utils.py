@@ -1,21 +1,8 @@
 from Query import Query
 import logging
-#from logger_utils import get_logger
 
-#loki-logger-handler1.1.2 importida, req.txt 
-# loki aadress - 3100/loki/api/v1/push
 
-# logging.basicConfig(
-#     level=logging.INFO,
-#     format="%(asctime)s [%(levelname)s] %(name)s - %(message)s",
-#     handlers=[
-#         logging.FileHandler("query.log"),
-#         logging.StreamHandler()  # logs to terminal
-        
-#     ]
-# )
-logger = logging.getLogger("query_utils")
-#logger = logging.getLogger(__name__)
+logger = logging.getLogger("A5Runner")
 
 _query_url = None
 _query_headers = None
@@ -57,6 +44,7 @@ def get_last_reading(dp_identifier):
     )
     return last_reading
 
+# Get datapoint last reading value by identifier
 def get_last_reading_value(dp_identifier):
     last_reading_value = get_last_reading(dp_identifier)
     return last_reading_value[0].get("value")
@@ -70,7 +58,6 @@ def get_last_prognosis_readings(dp_identifier):
             .filter(datapointPrognosisId__equals=last_prognosis_id)
             .get("/prognosis-readings")
         )
-        #print(f"last_prognosis_readings ===== ", last_prognosis_readings)
         return last_prognosis_readings
 
     else:
@@ -86,7 +73,6 @@ def get_datapoint_prognosis(dp_identifier):
             .filter(Id__equals=last_prognosis_id)
             .get("/datapoint-prognoses")
         )
-        #print(f"datapoint_prognosis ++++ ", datapoint_prognosis)
         logger.info(f"datapoint_prognosis: {datapoint_prognosis}")
         return datapoint_prognosis
     else:
