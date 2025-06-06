@@ -2,7 +2,8 @@
 cron: "10 */15 * * * *"
 logLevel: 4
 params:
-  apiEndpoint: "microgrids.localhost:8080"
+  apiEndpoint: "http://localhost:8080/api"
+  token: "Bearer YOUR_TOKEN"
   ess_max_P_dp_id: "ess_max_P"
   ess_charge_dp_id: "ess_charge"
   ess_max_E_dp_id: "ess_max_E"

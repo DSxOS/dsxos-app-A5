@@ -1,5 +1,8 @@
 import requests
 import logging
+from logger import setup_logger
+
+logger = logging.getLogger("Query")
 
 class Query:
     def __init__(self, base_url, headers=None, timeout=10):
@@ -9,7 +12,7 @@ class Query:
         self.params = {}
         self.timeout = timeout
         self.logger = logging.getLogger(__name__)
-        
+        logger.info(f"Query initialized with base_url={base_url}")
 
     def post(self, endpoint, data=None, json=None):
         return self._request("POST", endpoint, data=data, json=json)
@@ -19,13 +22,13 @@ class Query:
 
     def delete(self, endpoint):
         return self._request("DELETE", endpoint)
-    
+
     def filter(self, **kwargs):
         for key, value in kwargs.items():
             key = key.replace("__", ".")
             self.params[key] = value
         return self
-    
+
     def paginate(self, page=0, size=100):
         self.params["page"] = page
         self.params["size"] = size
@@ -35,7 +38,7 @@ class Query:
         # direction = "asc" or "desc"
         self.params["sort"] = f"{field},{direction}"
         return self
-    
+
     def get(self, endpoint, params=None):
         # combine all self.params and additional parameters
         combined_params = self.params.copy()
@@ -44,13 +47,13 @@ class Query:
         response = self._request("GET", endpoint, params=combined_params)
         self.params.clear()  # clean up params to make queries independent
         return response
-    
+
     def fetch(self, endpoint):
         return self.get(endpoint)
-    
+
     def post_fetch(self, endpoint, data=None, json=None):
         return self.post(endpoint, data=data, json=json)
-    
+
     def _request(self, method, endpoint, **kwargs):
         url = f"{self.base_url}{endpoint}"
         #print(f"Requesting: {method} {url}")  
@@ -60,7 +63,6 @@ class Query:
                 url,
                 headers=self.headers,
                 timeout=self.timeout,
-                #params=self.params,
                 **kwargs
             )
             response.raise_for_status()
