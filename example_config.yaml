@@ -1,21 +1,23 @@
 
-cron: "10 */15 * * * *"
-logLevel: 4
+cron: "10 */15 * * * *" # Execution every 15 minutes at 10'th second 
+logLevel: 4             # Logging level
 params:
-  apiEndpoint: "http://localhost:8080/api"
-  token: "Bearer YOUR_TOKEN"
-  ess_max_P_dp_id: "ess_max_P"
-  ess_charge_dp_id: "ess_charge"
-  ess_max_E_dp_id: "ess_max_E"
-  pccImportLimitW: 55000
-  pccExportLimitW: -1000000
-  ess_min_soc: 0
-  ess_max_soc: 100
-  essMinSafeLim: "ess_min_batt_safe_lim"
-  productionPrognosisIdentifier: "production_p_lt"
-  consumptionPrognosisIdentifier: "consumption_p_lt"
-  npPriceIdentifier: "elering_nps_price"
-  essCurrentPowerPlanIdentifier: "ess_p_lt_a5"
-  essResultPowerPlanIdentifier: "ess_p_lt_a5"
-  interval: 900
-  endTime_delta: 86400
+  apiEndpoint: "http://localhost:8080/api"  # API endpoint to call
+  token: "Bearer YOUR_TOKEN"                # Authorization token (replace with real one)
+  ess_max_P_dp_id: "ess_max_P"              # Storage capacity for SOC calculation
+  ess_charge_dp_id: "ess_charge"            # effective storage charge at the beginning of optimization in kWh (may be negative)
+  essEffectiveEndCharge: "ess_charge"       # effective charge of the storage device at the end of optimization in kWh
+  ess_max_E_dp_id: "ess_max_E"              # ESS max charge
+  pccImportLimitW: 55000                    # PCC limit energy import
+  pccExportLimitW: -1000000                 # PCC limit power export
+  ess_min_soc: 15                           # Minimum SOC allowed for peak shaving
+  ess_max_soc: 90                           # Maximum SOC allowed for peak shaving
+  essMinSafeLim: "ess_min_batt_safe_lim"    #
+  productionPrognosisIdentifier: "production_p_lt"    # Production forecast values
+  consumptionPrognosisIdentifier: "consumption_p_lt"  # Consumption forecast values
+  npPriceIdentifier: "elering_nps_price"              # Elering price forecast
+  essCurrentPowerPlanIdentifier: "ess_p_lt_a5"        # Previous prognosis that is used in case optimization fails
+  essResultPowerPlanIdentifier: "ess_p_lt_a5"         # Result prognosis
+  interval: 900                                       # 15 min
+  min_period: 21600                                   # 6 h, minimum period of data needed
+

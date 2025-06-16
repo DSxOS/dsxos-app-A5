@@ -1,7 +1,6 @@
 from pyomo.environ import *
 import numpy as np
 import pandas as pd
-#from Query import Query
 import query_utils
 from pathlib import Path
 import argparse
@@ -13,6 +12,7 @@ import Util
 #import logging
 #from loki_logger_handler import LokiHandler
 from logger import setup_logger
+from debug import debug_model
 
 # create parser
 parser = argparse.ArgumentParser(description="Run A5 with config file")
@@ -37,7 +37,7 @@ query_utils.init(api_url, api_headers)
 logger = setup_logger(
     log_file="query.log",
     loki_url="http://localhost:3100/loki/api/v1/push",  # Loki address
-    loki_tags={"app": "A5Runner", "env": "dev"},        # add more tags if needed
+    loki_tags={"app_name": "A5Runner"},        # add more tags if needed
     level="INFO"
 )
 
@@ -47,20 +47,21 @@ start_time = datetime.now(timezone.utc)
 
 ##################### read and validate input ########################### 
 interval = data["params"]["interval"]
+min_period = data["params"]["min_period"]
 
 np = [{"time": r["time"], "value": r["value"]} for r in query_utils.get_last_prognosis_readings(data["params"]["npPriceIdentifier"])] # elering
-prod = [{"time": r["time"], "value": r["value"]} for r in query_utils.get_last_prognosis_readings(data["params"]["productionPrognosisIdentifier"])] # production prognosis
-cons = [{"time": r["time"], "value": r["value"]} for r in query_utils.get_last_prognosis_readings(data["params"]["consumptionPrognosisIdentifier"])] # consumption prognosis
+prod = [{"time": r["time"], "value": r["value"]/1000} for r in query_utils.get_last_prognosis_readings(data["params"]["productionPrognosisIdentifier"])] # production prognosis
+cons = [{"time": r["time"], "value": r["value"]/1000} for r in query_utils.get_last_prognosis_readings(data["params"]["consumptionPrognosisIdentifier"])] # consumption prognosis
 
-ESS_kW = query_utils.get_datapoint(data["params"]["ess_max_P_dp_id"])[0]["lastReadingValue"] # salvesti võimsus - ess_max_P.last_reading
-ESS_kWh = query_utils.get_datapoint(data["params"]["ess_charge_dp_id"])[0]["lastReadingValue"] # salvesti efektiivne laetus optimeerimise alguses kWh-des (võib olla negatiivne) - ess_charge.last_reading
-ESS_max_kWh = query_utils.get_datapoint(data["params"]["ess_max_E_dp_id"])[0]["lastReadingValue"] # salvesti absoluutne mahutavus - ess_max_E.last_reading
-P_imp_lim_kW = data["params"]["pccImportLimitW"]  # main.get_datapoint("pccImportLimitW")[0]["lastReadingValue"] # pcc max tarbimine - pccImportLimitW
-P_exp_lim_kW = data["params"]["pccExportLimitW"] # main.get_datapoint("pccExportLimitW")[0]["lastReadingValue"] # pcc max müük/tootlus (negatiivne) - pccExportLimitW
+ESS_kW = query_utils.get_datapoint(data["params"]["ess_max_P_dp_id"])[0]["lastReadingValue"]/1000 # salvesti võimsus - ess_max_P.last_reading
+ESS_kWh = query_utils.get_datapoint(data["params"]["ess_charge_dp_id"])[0]["lastReadingValue"]/1000 # salvesti efektiivne laetus optimeerimise alguses kWh-des (võib olla negatiivne) - ess_charge.last_reading
+ESS_max_kWh = query_utils.get_datapoint(data["params"]["ess_max_E_dp_id"])[0]["lastReadingValue"]/1000 # salvesti absoluutne mahutavus - ess_max_E.last_reading
+P_imp_lim_kW = data["params"]["pccImportLimitW"]/1000  # main.get_datapoint("pccImportLimitW")[0]["lastReadingValue"] # pcc max tarbimine - pccImportLimitW
+P_exp_lim_kW = data["params"]["pccExportLimitW"]/1000 # main.get_datapoint("pccExportLimitW")[0]["lastReadingValue"] # pcc max müük/tootlus (negatiivne) - pccExportLimitW
 ESS_SOC_min = data["params"]["ess_min_soc"] # main.get_datapoint("essMinSoc")[0]["lastReadingValue"] # within safe limits - essMinSoc
 ESS_SOC_max = data["params"]["ess_max_soc"] # main.get_datapoint("essMaxSoc")[0]["lastReadingValue"] # - essMaxSoc
 ESS_safe_min = query_utils.get_datapoint(data["params"]["essMinSafeLim"])[0]["lastReadingValue"] # - ess_min_batt_safe_lim.last_reading
-ESS_END_kWh = query_utils.get_datapoint(data["params"]["ess_charge_dp_id"])[0]["lastReadingValue"] # salvesti efektiivne laetus optimeerimise lõpus kWh-des - ess_charge.last_reading
+ESS_END_kWh = query_utils.get_datapoint(data["params"]["ess_charge_dp_id"])[0]["lastReadingValue"]/1000 # salvesti efektiivne laetus optimeerimise lõpus kWh-des - ess_charge.last_reading
 kW_to_kWh = interval / 3600 # kordaja võimsuse teisendamiseks energiaks (intervallist tulenev)
 current_dp_id = data["params"]["essCurrentPowerPlanIdentifier"]
 result_dp_id = query_utils.get_datapoint(data["params"]["essResultPowerPlanIdentifier"])[0]["id"]
@@ -83,6 +84,7 @@ print(f"ESS_safe_min -- ,{ESS_safe_min}!")
 print(f"ESS_END_kWh -- ,{ESS_END_kWh}!")
 print(f"kW_to_kWh -- ,{kW_to_kWh}!")
 print(f"interval -- ,{interval}!")
+print(f"min_period -- ,{min_period}!")
 print(f"current_dp_id -- ,{current_dp_id}!")
 print(f"result_dp_id -- ,{result_dp_id}!")
 ########################################################################
@@ -131,30 +133,48 @@ def model_to_df(m):
     }
 
     df = pd.DataFrame(df_dict)
-
+    
     return df
 
-count = Util.calculate_count(np, start_time, interval)
-initial = query_utils.get_datapoint(data["params"]["npPriceIdentifier"])[0]["lastReadingValue"]
+time_range = Util.find_common_time_range([np, cons, prod])
+period = datetime.fromisoformat(time_range["end"]) - datetime.fromisoformat(time_range["start"])
 
-np_extracted = Util.generate_result_series(np, start_time, interval, int(count), initial)
-cons_extracted = Util.extract_prognosis_values(cons, "consumption", cons[0]["time"], interval, int(count))
-prod_extracted = Util.extract_prognosis_values(prod, "production", prod[0]["time"], interval, int(count))
+if int(period.total_seconds()) > min_period:
+    count = Util.calculate_count(np, start_time, interval)
+    initial = query_utils.get_datapoint(data["params"]["npPriceIdentifier"])[0]["lastReadingValue"]
+    time_range_start = datetime.fromisoformat(time_range["start"])
+    time_range_end = datetime.fromisoformat(time_range["end"])
+    print(f"count: {count}")
+    print(f"time_range: {time_range}")
+    print(f"initial: {initial}")
+    print(f"period: {period.total_seconds()} seconds")
+    # np_extracted = Util.generate_result_series(np, start_time, interval, int(count), initial)
+    # cons_extracted = Util.extract_prognosis_values(cons, "consumption", cons[0]["time"], interval, int(count))
+    # prod_extracted = Util.extract_prognosis_values(prod, "production", prod[0]["time"], interval, int(count))
 
-assert len(prod_extracted) == len(cons_extracted), "len(prod_extracted) != len(cons_extracted)"
-assert len(prod_extracted) == len(np_extracted), "len(prod) != len(np_extracted)"
+    np_extracted = Util.generate_result_series(np, start_time, time_range_end, interval, initial)
+    cons_extracted = Util.extract_prognosis_values(cons, "consumption", start_time, time_range_end, interval)
+    prod_extracted = Util.extract_prognosis_values(prod, "production", start_time, time_range_end, interval)
 
-########################################################################
-logger.info(f"len(prod_extracted): {len(prod_extracted)}")
-logger.info(f"len(cons_extracted): {len(cons_extracted)}")
-logger.info(f"len(np_extracted): {len(np_extracted)}")
-########################################################################
 
-data = pd.DataFrame({
-    'Load': cons_extracted,
-    'PV': prod_extracted,
-    'Spot': np_extracted,
-})
+    ########################################################################
+    logger.info(f"len(prod_extracted): {len(prod_extracted)}")
+    logger.info(f"prod_extracted: {prod_extracted}")
+    logger.info(f"len(cons_extracted): {len(cons_extracted)}")
+    logger.info(f"cons_extracted: {cons_extracted}")
+    logger.info(f"len(np_extracted): {len(np_extracted)}")
+    logger.info(f"np_extracted: {np_extracted}")
+    ########################################################################
+    assert len(prod_extracted) == len(cons_extracted), "len(prod_extracted) != len(cons_extracted)"
+    assert len(prod_extracted) == len(np_extracted), "len(prod) != len(np_extracted)"
+
+    data = pd.DataFrame({
+        'Load': Util.extract_values_only(cons_extracted),
+        'PV': Util.extract_values_only(prod_extracted),
+        'Spot': Util.extract_values_only(np_extracted),
+    })
+else: logger.error(f"Not enough current prognosis")
+
 
 # *************************
 # Build Model
@@ -259,9 +279,15 @@ m.objective = Objective(expr = cost, sense=minimize)
 # Solve
 solver = SolverFactory('glpk', options={'tmlim': 300})
 results = solver.solve(m)
+results.write()
+
+debug_model(m)
 results_path = Path(f"results_{start_time.strftime('%Y.%m.%d_%H.%M.%S')}.json").resolve()
 
-if (results.solver.status == SolverStatus.ok) and ((results.solver.termination_condition == TerminationCondition.optimal) or (results.solver.termination_condition == TerminationCondition.feasible)):
+if (results.solver.status == SolverStatus.ok) and (
+    (results.solver.termination_condition == TerminationCondition.optimal) 
+    or (results.solver.termination_condition == TerminationCondition.feasible)
+    ):
     # Format results as data frame
     results_df = model_to_df(m)
     
@@ -276,48 +302,49 @@ if (results.solver.status == SolverStatus.ok) and ((results.solver.termination_c
     # print("ESS")
     # print(",".join(f"{x:.4g}" for x in load))
 
-#     #pcc_export = results_df["PCC Export"].values
-#     #print("Export")
-#     #print(",".join(f"{x:.4g}" for x in pcc_export))
+    # pcc_export = results_df["PCC Export"].values
+    # print("Export")
+    # print(",".join(f"{x:.4g}" for x in pcc_export))
 
-#     #print("Import")
-#     #pcc_import_kW = results_df["PCC Import"].values
-#     #print(",".join(f"{x:.4g}" for x in pcc_import_kW))
-
-
-
-#     #soc = results_df["ESS effective SoC"].values
-#     #print(",".join(f"{x:.4g}" for x in soc))
-#     #print("SoC")
-#     #print(",".join(f"{x:.4g}" for x in soc))
+    # print("Import")
+    # pcc_import_kW = results_df["PCC Import"].values
+    # print(",".join(f"{x:.4g}" for x in pcc_import_kW))
 
 
-if (len(results_df) == 0):
-    # Use old prognosis, if it exists
-    logger.warning(f"Optimization failed - empty result")
-    essPowerPrognosisRaw = [r["value"] for r in query_utils.get_last_prognosis_readings(current_dp_id)]
-    # print("essPowerPrognosisRaw")
-    # print(essPowerPrognosisRaw)
-else:
-    # use optimized results
-    essPowerPrognosisRaw = results_df["ESS"].values    
 
-essPowerPlanned =[]
+    # soc = results_df["ESS effective SoC"].values
+    # print(",".join(f"{x:.4g}" for x in soc))
+    # print("SoC")
+    # print(",".join(f"{x:.4g}" for x in soc))
 
-for i, value in enumerate(essPowerPrognosisRaw):
-    reading_time = start_time + timedelta(seconds=i * interval)  
-    essPowerPlanned.append({
-        "time": reading_time.isoformat().replace('+00:00', 'Z'),
-        "value": value
-    })
+    if (len(results_df) == 0):
+        # Use old prognosis, if it exists
+        logger.warning(f"Optimization failed - empty result. Using old power prognosis.")
+        essPowerPrognosisRaw = [r["value"] for r in query_utils.get_last_prognosis_readings(current_dp_id)]
+    else:
+        # use optimized results
+        essPowerPrognosisRaw = results_df["ESS"].values * 1000
+
+    essPowerPlanned =[]
+
+    for i, value in enumerate(essPowerPrognosisRaw):
+        reading_time = start_time + timedelta(seconds=i * interval)  
+        essPowerPlanned.append({
+            "time": reading_time.isoformat().replace('+00:00', 'Z'),
+            "value": value
+        })
 
 
-prognosis_payload = {
-    "datapointId": result_dp_id,
-    "time": start_time.isoformat().replace('+00:00', 'Z'),
-    "readings":essPowerPlanned
-}
+    prognosis_payload = {
+        "datapointId": result_dp_id,
+        "time": start_time.isoformat().replace('+00:00', 'Z'),
+        "readings":essPowerPlanned
+    }
 
-response = query_utils.post_datapoint_prognosis(prognosis_payload)
-logger.info(f"datapoint prognosis was posted: {response}")
+    response = query_utils.post_datapoint_prognosis(prognosis_payload)
+    logger.info(f"datapoint prognosis was posted: {response}")
+        
+else: 
+    logger.error(f"Solver failed - empty result")
+
 logger.info("A5Runner finished")
