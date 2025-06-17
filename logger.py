@@ -33,8 +33,8 @@ class LokiHandler(logging.Handler):
         except Exception as e:
             print(f"[LokiHandler] Failed to send log to Loki: {e}")
 
-def setup_logger(name="A5Runner", log_file="query.log", loki_url=None, loki_tags=None, level=logging.INFO):
-    logger = logging.getLogger(name)
+def setup_logger(app_name="A5Runner", log_file="query.log", loki_url=None, loki_tags=None, level=logging.INFO):
+    logger = logging.getLogger(app_name)
     logger.setLevel(level)
     logger.handlers = []  # Clear existing handlers if rerun
 

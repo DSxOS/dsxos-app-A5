@@ -2,7 +2,7 @@ from Query import Query
 import logging
 
 
-logger = logging.getLogger("A5Runner")
+logger = logging.getLogger()
 
 _query_url = None
 _query_headers = None

@@ -7,10 +7,7 @@ import argparse
 import yaml
 from datetime import datetime, timezone
 from datetime import timedelta
-#from RemoteLogger import RemoteLogger
 import Util
-#import logging
-#from loki_logger_handler import LokiHandler
 from logger import setup_logger
 from debug import debug_model
 
@@ -19,21 +16,15 @@ parser = argparse.ArgumentParser(description="Run A5 with config file")
 parser.add_argument("-c", "--config", required=True, help="Path to config YAML file")
 args = parser.parse_args() # Read arguments
 with open(args.config, "r") as f: # Open and read config-file
-    data = yaml.safe_load(f)
+    raw_data = yaml.safe_load(f)
     
 # Extract API URL and Token
-api_url = data["params"]["apiEndpoint"]
-api_token = data["params"]["token"]
+api_url = raw_data["params"]["apiEndpoint"]
+api_token = raw_data["params"]["token"]
 api_headers = {"Authorization": api_token}
 
 # Initialize query_utils with URL + headers    
 query_utils.init(api_url, api_headers)
-
-
-    
-#CONFIG_PATH = "app/config.yaml"
-#MAIN_SCRIPT = "app/main.py"
-
 logger = setup_logger(
     log_file="query.log",
     loki_url="http://localhost:3100/loki/api/v1/push",  # Loki address
@@ -45,32 +36,34 @@ logger.info("A5Runner start")
 
 start_time = datetime.now(timezone.utc)
 
-##################### read and validate input ########################### 
-interval = data["params"]["interval"]
-min_period = data["params"]["min_period"]
+########################################################################
+# Read and validate input
+########################################################################
+interval = raw_data["params"]["interval"]
+min_period = raw_data["params"]["min_period"]
 
-np = [{"time": r["time"], "value": r["value"]} for r in query_utils.get_last_prognosis_readings(data["params"]["npPriceIdentifier"])] # elering
-prod = [{"time": r["time"], "value": r["value"]/1000} for r in query_utils.get_last_prognosis_readings(data["params"]["productionPrognosisIdentifier"])] # production prognosis
-cons = [{"time": r["time"], "value": r["value"]/1000} for r in query_utils.get_last_prognosis_readings(data["params"]["consumptionPrognosisIdentifier"])] # consumption prognosis
+np = [{"time": r["time"], "value": r["value"]} for r in query_utils.get_last_prognosis_readings(raw_data["params"]["npPriceIdentifier"])] # elering
+prod = [{"time": r["time"], "value": r["value"]/1000} for r in query_utils.get_last_prognosis_readings(raw_data["params"]["productionPrognosisIdentifier"])] # production prognosis
+cons = [{"time": r["time"], "value": r["value"]/1000} for r in query_utils.get_last_prognosis_readings(raw_data["params"]["consumptionPrognosisIdentifier"])] # consumption prognosis
 
-ESS_kW = query_utils.get_datapoint(data["params"]["ess_max_P_dp_id"])[0]["lastReadingValue"]/1000 # salvesti võimsus - ess_max_P.last_reading
-ESS_kWh = query_utils.get_datapoint(data["params"]["ess_charge_dp_id"])[0]["lastReadingValue"]/1000 # salvesti efektiivne laetus optimeerimise alguses kWh-des (võib olla negatiivne) - ess_charge.last_reading
-ESS_max_kWh = query_utils.get_datapoint(data["params"]["ess_max_E_dp_id"])[0]["lastReadingValue"]/1000 # salvesti absoluutne mahutavus - ess_max_E.last_reading
-P_imp_lim_kW = data["params"]["pccImportLimitW"]/1000  # main.get_datapoint("pccImportLimitW")[0]["lastReadingValue"] # pcc max tarbimine - pccImportLimitW
-P_exp_lim_kW = data["params"]["pccExportLimitW"]/1000 # main.get_datapoint("pccExportLimitW")[0]["lastReadingValue"] # pcc max müük/tootlus (negatiivne) - pccExportLimitW
-ESS_SOC_min = data["params"]["ess_min_soc"] # main.get_datapoint("essMinSoc")[0]["lastReadingValue"] # within safe limits - essMinSoc
-ESS_SOC_max = data["params"]["ess_max_soc"] # main.get_datapoint("essMaxSoc")[0]["lastReadingValue"] # - essMaxSoc
-ESS_safe_min = query_utils.get_datapoint(data["params"]["essMinSafeLim"])[0]["lastReadingValue"] # - ess_min_batt_safe_lim.last_reading
-ESS_END_kWh = query_utils.get_datapoint(data["params"]["ess_charge_dp_id"])[0]["lastReadingValue"]/1000 # salvesti efektiivne laetus optimeerimise lõpus kWh-des - ess_charge.last_reading
+ESS_kW = query_utils.get_datapoint(raw_data["params"]["ess_max_P_dp_id"])[0]["lastReadingValue"]/1000 # salvesti võimsus - ess_max_P.last_reading
+ESS_kWh = query_utils.get_datapoint(raw_data["params"]["ess_charge_dp_id"])[0]["lastReadingValue"]/1000 # salvesti efektiivne laetus optimeerimise alguses kWh-des (võib olla negatiivne) - ess_charge.last_reading
+ESS_max_kWh = query_utils.get_datapoint(raw_data["params"]["ess_max_E_dp_id"])[0]["lastReadingValue"]/1000 # salvesti absoluutne mahutavus - ess_max_E.last_reading
+P_imp_lim_kW = raw_data["params"]["pccImportLimitW"]/1000  # main.get_datapoint("pccImportLimitW")[0]["lastReadingValue"] # pcc max tarbimine - pccImportLimitW
+P_exp_lim_kW = raw_data["params"]["pccExportLimitW"]/1000 # main.get_datapoint("pccExportLimitW")[0]["lastReadingValue"] # pcc max müük/tootlus (negatiivne) - pccExportLimitW
+ESS_SOC_min = raw_data["params"]["ess_min_soc"] # main.get_datapoint("essMinSoc")[0]["lastReadingValue"] # within safe limits - essMinSoc
+ESS_SOC_max = raw_data["params"]["ess_max_soc"] # main.get_datapoint("essMaxSoc")[0]["lastReadingValue"] # - essMaxSoc
+ESS_safe_min = query_utils.get_datapoint(raw_data["params"]["essMinSafeLim"])[0]["lastReadingValue"] # - ess_min_batt_safe_lim.last_reading
+ESS_END_kWh = query_utils.get_datapoint(raw_data["params"]["ess_charge_dp_id"])[0]["lastReadingValue"]/1000 # salvesti efektiivne laetus optimeerimise lõpus kWh-des - ess_charge.last_reading
 kW_to_kWh = interval / 3600 # kordaja võimsuse teisendamiseks energiaks (intervallist tulenev)
-current_dp_id = data["params"]["essCurrentPowerPlanIdentifier"]
-result_dp_id = query_utils.get_datapoint(data["params"]["essResultPowerPlanIdentifier"])[0]["id"]
+
+current_dp_id = raw_data["params"]["essCurrentPowerPlanIdentifier"]
+result_dp_id = query_utils.get_datapoint(raw_data["params"]["essResultPowerPlanIdentifier"])[0]["id"]
 
 ########################################################################
 logger.info(f"len(prod): {len(prod)}")
 logger.info(f"len(cons): {len(cons)}")
 logger.info(f"len(np): {len(np)}")
-########################################################################
 ########################################################################
 print("=========================")
 print(f"ESS_kW -- ,{ESS_kW}!")
@@ -133,24 +126,22 @@ def model_to_df(m):
     }
 
     df = pd.DataFrame(df_dict)
-    
+    print(df)
     return df
 
 time_range = Util.find_common_time_range([np, cons, prod])
 period = datetime.fromisoformat(time_range["end"]) - datetime.fromisoformat(time_range["start"])
 
 if int(period.total_seconds()) > min_period:
-    count = Util.calculate_count(np, start_time, interval)
-    initial = query_utils.get_datapoint(data["params"]["npPriceIdentifier"])[0]["lastReadingValue"]
     time_range_start = datetime.fromisoformat(time_range["start"])
     time_range_end = datetime.fromisoformat(time_range["end"])
+    count = Util.calculate_count(np, start_time, interval)
+    initial = query_utils.get_datapoint(raw_data["params"]["npPriceIdentifier"])[0]["lastReadingValue"]
+
     print(f"count: {count}")
     print(f"time_range: {time_range}")
     print(f"initial: {initial}")
     print(f"period: {period.total_seconds()} seconds")
-    # np_extracted = Util.generate_result_series(np, start_time, interval, int(count), initial)
-    # cons_extracted = Util.extract_prognosis_values(cons, "consumption", cons[0]["time"], interval, int(count))
-    # prod_extracted = Util.extract_prognosis_values(prod, "production", prod[0]["time"], interval, int(count))
 
     np_extracted = Util.generate_result_series(np, start_time, time_range_end, interval, initial)
     cons_extracted = Util.extract_prognosis_values(cons, "consumption", start_time, time_range_end, interval)
@@ -159,11 +150,11 @@ if int(period.total_seconds()) > min_period:
 
     ########################################################################
     logger.info(f"len(prod_extracted): {len(prod_extracted)}")
-    logger.info(f"prod_extracted: {prod_extracted}")
+    # logger.info(f"prod_extracted: {prod_extracted}")
     logger.info(f"len(cons_extracted): {len(cons_extracted)}")
-    logger.info(f"cons_extracted: {cons_extracted}")
+    # logger.info(f"cons_extracted: {cons_extracted}")
     logger.info(f"len(np_extracted): {len(np_extracted)}")
-    logger.info(f"np_extracted: {np_extracted}")
+    # logger.info(f"np_extracted: {np_extracted}")
     ########################################################################
     assert len(prod_extracted) == len(cons_extracted), "len(prod_extracted) != len(cons_extracted)"
     assert len(prod_extracted) == len(np_extracted), "len(prod) != len(np_extracted)"
@@ -176,9 +167,9 @@ if int(period.total_seconds()) > min_period:
 else: logger.error(f"Not enough current prognosis")
 
 
-# *************************
+########################################################################
 # Build Model
-#**************************
+########################################################################
 m = ConcreteModel()
 
 # Fixed Parameters
@@ -262,9 +253,9 @@ def pcc_self_consumption_rule(m, t):
 
 m.pcc_self_consumption = Constraint(m.T, rule=pcc_self_consumption_rule)
 
-# **********************
+########################################################################
 # Cost function and optimization objective
-# **********************
+########################################################################
 
 # Value constants
 ESS_DEG_COST = 0.05
@@ -276,13 +267,15 @@ cost = sum(( (m.PCC_IMPORT_kW[t]/1000)*kW_to_kWh*(m.SPOT_EUR_kWh[t]/1000 + GRID_
             (m.ESS_kW_charge[t]/1000)*kW_to_kWh*ESS_DEG_COST ) for t in m.T) #
 m.objective = Objective(expr = cost, sense=minimize)
 
+########################################################################
 # Solve
+# ######################################################################
 solver = SolverFactory('glpk', options={'tmlim': 300})
 results = solver.solve(m)
 results.write()
 
 debug_model(m)
-results_path = Path(f"results_{start_time.strftime('%Y.%m.%d_%H.%M.%S')}.json").resolve()
+# results_path = Path(f"results_{start_time.strftime('%Y.%m.%d_%H.%M.%S')}.json").resolve()
 
 if (results.solver.status == SolverStatus.ok) and (
     (results.solver.termination_condition == TerminationCondition.optimal) 
@@ -297,25 +290,6 @@ if (results.solver.status == SolverStatus.ok) and (
     #     logger.info(f"Results saved to {results_path.resolve()}")
     # except Exception as e:
     #     logger.error(f"Failed to save results to JSON: {e}")
-
-    # load = results_df["ESS"].values
-    # print("ESS")
-    # print(",".join(f"{x:.4g}" for x in load))
-
-    # pcc_export = results_df["PCC Export"].values
-    # print("Export")
-    # print(",".join(f"{x:.4g}" for x in pcc_export))
-
-    # print("Import")
-    # pcc_import_kW = results_df["PCC Import"].values
-    # print(",".join(f"{x:.4g}" for x in pcc_import_kW))
-
-
-
-    # soc = results_df["ESS effective SoC"].values
-    # print(",".join(f"{x:.4g}" for x in soc))
-    # print("SoC")
-    # print(",".join(f"{x:.4g}" for x in soc))
 
     if (len(results_df) == 0):
         # Use old prognosis, if it exists

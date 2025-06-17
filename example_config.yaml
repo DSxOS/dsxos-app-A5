@@ -5,8 +5,8 @@ params:
   apiEndpoint: "http://localhost:8080/api"  # API endpoint to call
   token: "Bearer YOUR_TOKEN"                # Authorization token (replace with real one)
   ess_max_P_dp_id: "ess_max_P"              # Storage capacity for SOC calculation
-  ess_charge_dp_id: "ess_charge"            # effective storage charge at the beginning of optimization in kWh (may be negative)
-  essEffectiveEndCharge: "ess_charge"       # effective charge of the storage device at the end of optimization in kWh
+  ess_charge_dp_id: "ess_charge"            # effective storage charge at the beginning of optimization(may be negative)
+  essEffectiveEndCharge: "ess_charge"       # effective charge of the storage device at the end of optimization 
   ess_max_E_dp_id: "ess_max_E"              # ESS max charge
   pccImportLimitW: 55000                    # PCC limit energy import
   pccExportLimitW: -1000000                 # PCC limit power export
