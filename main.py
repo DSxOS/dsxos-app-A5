@@ -23,16 +23,18 @@ api_url = raw_data["params"]["apiEndpoint"]
 api_token = raw_data["params"]["token"]
 api_headers = {"Authorization": api_token}
 
+app_name = raw_data["appModule"]
+
 # Initialize query_utils with URL + headers    
 query_utils.init(api_url, api_headers)
 logger = setup_logger(
     log_file="query.log",
     loki_url="http://localhost:3100/loki/api/v1/push",  # Loki address
-    loki_tags={"app_name": "A5Runner"},        # add more tags if needed
+    loki_tags={"app_name": app_name},        # add more tags if needed
     level="INFO"
 )
 
-logger.info("A5Runner start")
+logger.info(f"{app_name} start.")
 
 start_time = datetime.now(timezone.utc)
 
@@ -54,6 +56,7 @@ P_exp_lim_kW = raw_data["params"]["pccExportLimitW"]/1000 # main.get_datapoint("
 ESS_SOC_min = raw_data["params"]["ess_min_soc"] # main.get_datapoint("essMinSoc")[0]["lastReadingValue"] # within safe limits - essMinSoc
 ESS_SOC_max = raw_data["params"]["ess_max_soc"] # main.get_datapoint("essMaxSoc")[0]["lastReadingValue"] # - essMaxSoc
 ESS_safe_min = query_utils.get_datapoint(raw_data["params"]["essMinSafeLim"])[0]["lastReadingValue"] # - ess_min_batt_safe_lim.last_reading
+# ESS_safe_min = raw_data["params"]["essMinSafeLim"] # - ess_min_batt_safe_lim.last_reading
 ESS_END_kWh = query_utils.get_datapoint(raw_data["params"]["ess_charge_dp_id"])[0]["lastReadingValue"]/1000 # salvesti efektiivne laetus optimeerimise lõpus kWh-des - ess_charge.last_reading
 kW_to_kWh = interval / 3600 # kordaja võimsuse teisendamiseks energiaks (intervallist tulenev)
 
@@ -98,6 +101,7 @@ print(f"ESS_SOC_0 -- ,{ESS_SOC_0}!")
 print(f"ESS_SOC_END -- ,{ESS_SOC_END}!")
 ########################################################################
 
+# Convert list-of-dict model into a DataFrame
 def model_to_df(m):
     st = 0
     en = len(m.T)
@@ -129,9 +133,11 @@ def model_to_df(m):
     print(df)
     return df
 
+# Find a common time range for two or more different forecasts
 time_range = Util.find_common_time_range([np, cons, prod])
+# Calculate the length of the common time range
 period = datetime.fromisoformat(time_range["end"]) - datetime.fromisoformat(time_range["start"])
-
+# If common time range is bigger than given min_period
 if int(period.total_seconds()) > min_period:
     time_range_start = datetime.fromisoformat(time_range["start"])
     time_range_end = datetime.fromisoformat(time_range["end"])
@@ -142,8 +148,10 @@ if int(period.total_seconds()) > min_period:
     print(f"time_range: {time_range}")
     print(f"initial: {initial}")
     print(f"period: {period.total_seconds()} seconds")
-
+    
+    # regenerates prognosis values starting with start time and initial value and with given interval
     np_extracted = Util.generate_result_series(np, start_time, time_range_end, interval, initial)
+    # extracts prognosis values starting with start time, with given interval and common time range endtime
     cons_extracted = Util.extract_prognosis_values(cons, "consumption", start_time, time_range_end, interval)
     prod_extracted = Util.extract_prognosis_values(prod, "production", start_time, time_range_end, interval)
 
@@ -274,9 +282,13 @@ solver = SolverFactory('glpk', options={'tmlim': 300})
 results = solver.solve(m)
 results.write()
 
+# Debug the model to log infeasible constraints, variable values, and constraint statuses 
+# and save diagnostic output to a file
 debug_model(m)
+
 # results_path = Path(f"results_{start_time.strftime('%Y.%m.%d_%H.%M.%S')}.json").resolve()
 
+# Check that the solver completed successfully with an optimal or feasible result
 if (results.solver.status == SolverStatus.ok) and (
     (results.solver.termination_condition == TerminationCondition.optimal) 
     or (results.solver.termination_condition == TerminationCondition.feasible)
@@ -290,7 +302,9 @@ if (results.solver.status == SolverStatus.ok) and (
     #     logger.info(f"Results saved to {results_path.resolve()}")
     # except Exception as e:
     #     logger.error(f"Failed to save results to JSON: {e}")
-
+    
+    # Use the variable from 'results_df' if available;  
+    # otherwise, fall back to the previous prognosis and readings.
     if (len(results_df) == 0):
         # Use old prognosis, if it exists
         logger.warning(f"Optimization failed - empty result. Using old power prognosis.")
@@ -298,9 +312,9 @@ if (results.solver.status == SolverStatus.ok) and (
     else:
         # use optimized results
         essPowerPrognosisRaw = results_df["ESS"].values * 1000
-
+        
+    # Create a list of prognosis readings with corresponding timestamps
     essPowerPlanned =[]
-
     for i, value in enumerate(essPowerPrognosisRaw):
         reading_time = start_time + timedelta(seconds=i * interval)  
         essPowerPlanned.append({
@@ -308,17 +322,17 @@ if (results.solver.status == SolverStatus.ok) and (
             "value": value
         })
 
-
+    # Construct the prognosis payload with datapoint ID, timestamp, and planned ESS power readings
     prognosis_payload = {
         "datapointId": result_dp_id,
         "time": start_time.isoformat().replace('+00:00', 'Z'),
         "readings":essPowerPlanned
     }
-
+    # POST datapoint prognosis and prognosis readings
     response = query_utils.post_datapoint_prognosis(prognosis_payload)
     logger.info(f"datapoint prognosis was posted: {response}")
         
 else: 
     logger.error(f"Solver failed - empty result")
 
-logger.info("A5Runner finished")
+logger.info(f"{app_name} finished")

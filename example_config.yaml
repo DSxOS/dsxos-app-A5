@@ -1,4 +1,11 @@
-
+# a5.yaml
+---
+# refers to directory under <repo>/python-modules/<python-module>
+appModule: a5
+type: python
+# has to be lowercase
+containerName: demo-a5
+# 6-field cron expression
 cron: "10 */15 * * * *" # Execution every 15 minutes at 10'th second 
 logLevel: 4             # Logging level
 params:
@@ -12,7 +19,11 @@ params:
   pccExportLimitW: -1000000                 # PCC limit power export
   ess_min_soc: 15                           # Minimum SOC allowed for peak shaving
   ess_max_soc: 90                           # Maximum SOC allowed for peak shaving
-  essMinSafeLim: "ess_min_batt_safe_lim"    #
+  essMinSafeLim: "ess_min_batt_safe_lim"
+  # essMinSafeLim: 
+  #   expression: x
+  #   expressionMap:
+  #     x: ess_min_batt_safe_lim.last_reading    #
   productionPrognosisIdentifier: "production_p_lt"    # Production forecast values
   consumptionPrognosisIdentifier: "consumption_p_lt"  # Consumption forecast values
   npPriceIdentifier: "elering_nps_price"              # Elering price forecast
