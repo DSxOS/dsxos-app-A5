@@ -137,6 +137,7 @@ def model_to_df(m):
 time_range = Util.find_common_time_range([np, cons, prod])
 # Calculate the length of the common time range
 period = datetime.fromisoformat(time_range["end"]) - datetime.fromisoformat(time_range["start"])
+logger.info(f"period: {period}")
 # If common time range is bigger than given min_period
 if int(period.total_seconds()) > min_period:
     time_range_start = datetime.fromisoformat(time_range["start"])
