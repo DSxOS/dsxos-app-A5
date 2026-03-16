@@ -13,7 +13,7 @@ from debug import debug_model
 
 # create parser
 parser = argparse.ArgumentParser(description="Run A5 with config file")
-parser.add_argument("-c", "--config", required=True, help="Path to config YAML file")
+parser.add_argument("-c", "--config", required=False, help="Path to config YAML file", default="/app/config.yaml")
 args = parser.parse_args() # Read arguments
 with open(args.config, "r") as f: # Open and read config-file
     raw_data = yaml.safe_load(f)
