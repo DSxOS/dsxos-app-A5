@@ -1,339 +1,264 @@
-from pyomo.environ import *
-import numpy as np
-import pandas as pd
-import query_utils
-from pathlib import Path
+"""A5 economic optimisation: plans the ESS power for the coming forecast horizon at minimum energy cost (EUR).
+
+Run by the platform's python-app scheduler with the site's config (default /app/config.yaml).
+Requirements: docs/requirements-a5-improvements.md (A5-IMP), docs/requirements-client-credentials-glpk.md (A5-AUTH).
+Exit codes: 0 = plan (or fallback plan) posted, 1 = configuration/input error or no plan possible.
+"""
 import argparse
+import logging
+import sys
+from datetime import datetime, timedelta, timezone
+
 import yaml
-from datetime import datetime, timezone
-from datetime import timedelta
+
+import model as a5model
+import query_utils
 import Util
-from logger import setup_logger
 from debug import debug_model
+from logger import setup_logger
 
-# create parser
-parser = argparse.ArgumentParser(description="Run A5 with config file")
-parser.add_argument("-c", "--config", required=False, help="Path to config YAML file", default="/app/config.yaml")
-args = parser.parse_args() # Read arguments
-with open(args.config, "r") as f: # Open and read config-file
-    raw_data = yaml.safe_load(f)
-    
-# Extract API URL and Token
-api_url = raw_data["params"]["apiEndpoint"]
-api_token = raw_data["params"]["token"]
-api_headers = {"Authorization": api_token}
+logger = logging.getLogger("A5Runner")
 
-app_name = raw_data["appModule"]
-
-# Initialize query_utils with URL + headers    
-query_utils.init(api_url, api_headers)
-logger = setup_logger(
-    log_file="query.log",
-    loki_url="http://localhost:3100/loki/api/v1/push",  # Loki address
-    loki_tags={"app_name": app_name},        # add more tags if needed
-    level="INFO"
-)
-
-logger.info(f"{app_name} start.")
-
-start_time = datetime.now(timezone.utc)
-
-########################################################################
-# Read and validate input
-########################################################################
-interval = raw_data["params"]["interval"]
-min_period = raw_data["params"]["min_period"]
-
-np = [{"time": r["time"], "value": r["value"]} for r in query_utils.get_last_prognosis_readings(raw_data["params"]["npPriceIdentifier"])] # elering
-prod = [{"time": r["time"], "value": r["value"]/1000} for r in query_utils.get_last_prognosis_readings(raw_data["params"]["productionPrognosisIdentifier"])] # production prognosis
-cons = [{"time": r["time"], "value": r["value"]/1000} for r in query_utils.get_last_prognosis_readings(raw_data["params"]["consumptionPrognosisIdentifier"])] # consumption prognosis
-
-ESS_kW = query_utils.get_datapoint(raw_data["params"]["ess_max_P_dp_id"])[0]["lastReadingValue"]/1000 # salvesti võimsus - ess_max_P.last_reading
-ESS_kWh = query_utils.get_datapoint(raw_data["params"]["ess_charge_dp_id"])[0]["lastReadingValue"]/1000 # salvesti efektiivne laetus optimeerimise alguses kWh-des (võib olla negatiivne) - ess_charge.last_reading
-ESS_max_kWh = query_utils.get_datapoint(raw_data["params"]["ess_max_E_dp_id"])[0]["lastReadingValue"]/1000 # salvesti absoluutne mahutavus - ess_max_E.last_reading
-P_imp_lim_kW = raw_data["params"]["pccImportLimitW"]/1000  # main.get_datapoint("pccImportLimitW")[0]["lastReadingValue"] # pcc max tarbimine - pccImportLimitW
-P_exp_lim_kW = raw_data["params"]["pccExportLimitW"]/1000 # main.get_datapoint("pccExportLimitW")[0]["lastReadingValue"] # pcc max müük/tootlus (negatiivne) - pccExportLimitW
-ESS_SOC_min = raw_data["params"]["ess_min_soc"] # main.get_datapoint("essMinSoc")[0]["lastReadingValue"] # within safe limits - essMinSoc
-ESS_SOC_max = raw_data["params"]["ess_max_soc"] # main.get_datapoint("essMaxSoc")[0]["lastReadingValue"] # - essMaxSoc
-ESS_safe_min = query_utils.get_datapoint(raw_data["params"]["essMinSafeLim"])[0]["lastReadingValue"] # - ess_min_batt_safe_lim.last_reading
-# ESS_safe_min = raw_data["params"]["essMinSafeLim"] # - ess_min_batt_safe_lim.last_reading
-ESS_END_kWh = query_utils.get_datapoint(raw_data["params"]["ess_charge_dp_id"])[0]["lastReadingValue"]/1000 # salvesti efektiivne laetus optimeerimise lõpus kWh-des - ess_charge.last_reading
-kW_to_kWh = interval / 3600 # kordaja võimsuse teisendamiseks energiaks (intervallist tulenev)
-
-current_dp_id = raw_data["params"]["essCurrentPowerPlanIdentifier"]
-result_dp_id = query_utils.get_datapoint(raw_data["params"]["essResultPowerPlanIdentifier"])[0]["id"]
-
-########################################################################
-logger.info(f"len(prod): {len(prod)}")
-logger.info(f"len(cons): {len(cons)}")
-logger.info(f"len(np): {len(np)}")
-########################################################################
-print("=========================")
-print(f"ESS_kW -- ,{ESS_kW}!")
-print(f"ESS_kWh -- ,{ESS_kWh}!")
-print(f"ESS_max_kWh -- ,{ESS_max_kWh}!")
-print(f"P_imp_lim_kW -- ,{P_imp_lim_kW}!")
-print(f"P_exp_lim_kW -- ,{P_exp_lim_kW}!")
-print(f"ESS_SOC_min -- ,{ESS_SOC_min}!")
-print(f"ESS_SOC_max -- ,{ESS_SOC_max}!")
-print(f"ESS_safe_min -- ,{ESS_safe_min}!")
-print(f"ESS_END_kWh -- ,{ESS_END_kWh}!")
-print(f"kW_to_kWh -- ,{kW_to_kWh}!")
-print(f"interval -- ,{interval}!")
-print(f"min_period -- ,{min_period}!")
-print(f"current_dp_id -- ,{current_dp_id}!")
-print(f"result_dp_id -- ,{result_dp_id}!")
-########################################################################
-
-ESS_eff_kWh = (ESS_max_kWh*(ESS_SOC_max - ESS_SOC_min)/100) # Salvesti efektiivne mahutavus
-ESS_SOC_0 = (ESS_max_kWh*ESS_SOC_min/100 + ESS_kWh)/ESS_max_kWh*100
-ESS_SOC_END = (ESS_END_kWh/ESS_eff_kWh + ESS_safe_min)*100
-ESS_SOC_END = (ESS_max_kWh*ESS_SOC_min/100 + ESS_END_kWh)/ESS_max_kWh*100
-ESS_SOC_0 = 0 if ESS_SOC_0 < 0 else ESS_SOC_0
-ESS_SOC_0 = 100 if ESS_SOC_0 > 100 else ESS_SOC_0
-ESS_SOC_END = ESS_SOC_min if ESS_SOC_END < ESS_SOC_min else ESS_SOC_END
-ESS_SOC_END = ESS_SOC_max if ESS_SOC_END > ESS_SOC_max else ESS_SOC_END
-
-########################################################################
-print("=========================")
-print(f"ESS_eff_kWh -- ,{ESS_eff_kWh}!")
-print(f"ESS_SOC_0 -- ,{ESS_SOC_0}!")
-print(f"ESS_SOC_END -- ,{ESS_SOC_END}!")
-########################################################################
-
-# Convert list-of-dict model into a DataFrame
-def model_to_df(m):
-    st = 0
-    en = len(m.T)
-
-    periods = range(st, en)
-    print(f"periods: , {len(periods)}")
-    load = [value(m.P_kW[i]) for i in periods]
-    pv = [value(m.PV_kW[i]) for i in periods]
-    pcc_export = [value(m.PCC_EXPORT_kW[i]) for i in periods]
-    pcc_import_kW = [value(m.PCC_IMPORT_kW[i]) for i in periods]
-    ess = [value(m.ESS_kW[i]) for i in periods]
-    ess_soc = [value(m.ESS_SoC[i]) for i in periods]
-    pcc = [value(m.PCC_IMPORT_kW[i])-value(m.PCC_EXPORT_kW[i]) for i in periods]
-    spot = [value(m.SPOT_EUR_kWh[i]) for i in periods]
-
-    df_dict = {
-        'Period': periods,
-        'Load': load,
-        'PV': pv,
-        'ESS': ess,
-        'ESS effective SoC': ess_soc,
-        'PCC Export': pcc_export,
-        'PCC Import': pcc_import_kW,
-        'PCC': pcc,
-        'Spot Price': spot
-    }
-
-    df = pd.DataFrame(df_dict)
-    print(df)
-    return df
-
-# Find a common time range for two or more different forecasts
-time_range = Util.find_common_time_range([np, cons, prod])
-# Calculate the length of the common time range
-period = datetime.fromisoformat(time_range["end"]) - datetime.fromisoformat(time_range["start"])
-logger.info(f"period: {period}")
-# If common time range is bigger than given min_period
-if int(period.total_seconds()) > min_period:
-    time_range_start = datetime.fromisoformat(time_range["start"])
-    time_range_end = datetime.fromisoformat(time_range["end"])
-    count = Util.calculate_count(np, start_time, interval)
-    initial = query_utils.get_datapoint(raw_data["params"]["npPriceIdentifier"])[0]["lastReadingValue"]
-
-    print(f"count: {count}")
-    print(f"time_range: {time_range}")
-    print(f"initial: {initial}")
-    print(f"period: {period.total_seconds()} seconds")
-    
-    # regenerates prognosis values starting with start time and initial value and with given interval
-    np_extracted = Util.generate_result_series(np, start_time, time_range_end, interval, initial)
-    # extracts prognosis values starting with start time, with given interval and common time range endtime
-    cons_extracted = Util.extract_prognosis_values(cons, "consumption", start_time, time_range_end, interval)
-    prod_extracted = Util.extract_prognosis_values(prod, "production", start_time, time_range_end, interval)
+DEFAULTS = {
+    "essChargeEfficiency": 0.95,
+    "essDischargeEfficiency": 0.95,
+    "gridTariffEurPerKWh": 0.05,
+    "essDegradationCostEurPerKWh": 0.05,
+    "pccLimitPenaltyEurPerKWh": 10.0,
+    "endEnergyPenaltyEurPerKWh": 1.0,
+    "solverTimeLimitS": 300,
+    "maxInputAgeS": 900,
+    "lokiUrl": "http://localhost:3100/loki/api/v1/push",
+    "writeDebugFile": "on-failure",
+    "essEffectiveEndCharge": None,
+}
+REQUIRED = [
+    "apiEndpoint", "clientId", "token",
+    "npPriceIdentifier", "consumptionPrognosisIdentifier", "productionPrognosisIdentifier",
+    "ess_max_P_dp_id", "ess_charge_dp_id", "ess_max_E_dp_id",
+    "pccImportLimitW", "pccExportLimitW", "ess_min_soc", "ess_max_soc",
+    "essResultPowerPlanIdentifier", "essCurrentPowerPlanIdentifier", "interval", "min_period",
+]
 
 
-    ########################################################################
-    logger.info(f"len(prod_extracted): {len(prod_extracted)}")
-    # logger.info(f"prod_extracted: {prod_extracted}")
-    logger.info(f"len(cons_extracted): {len(cons_extracted)}")
-    # logger.info(f"cons_extracted: {cons_extracted}")
-    logger.info(f"len(np_extracted): {len(np_extracted)}")
-    # logger.info(f"np_extracted: {np_extracted}")
-    ########################################################################
-    assert len(prod_extracted) == len(cons_extracted), "len(prod_extracted) != len(cons_extracted)"
-    assert len(prod_extracted) == len(np_extracted), "len(prod) != len(np_extracted)"
-
-    data = pd.DataFrame({
-        'Load': Util.extract_values_only(cons_extracted),
-        'PV': Util.extract_values_only(prod_extracted),
-        'Spot': Util.extract_values_only(np_extracted),
-    })
-else: logger.error(f"Not enough current prognosis")
+class ConfigError(Exception):
+    pass
 
 
-########################################################################
-# Build Model
-########################################################################
-m = ConcreteModel()
+class InputError(Exception):
+    pass
 
-# Fixed Parameters
-m.T = Set(initialize=data.index.tolist(), doc='Indexes', ordered=True)
-m.P_kW = Param(m.T, initialize=data.Load, doc='Load [kW]', within=Any)
-m.PV_kW = Param(m.T, initialize=data.PV, doc='PV generation [kW]', within=Any)
-m.SPOT_EUR_kWh = Param(m.T, initialize=data.Spot, doc='Spot Market Price [€/kWh]', within=Any)
 
-# Variable Parameters
-m.PCC_exp_z = Var(m.T, bounds=(0,1), within=NonNegativeIntegers)
-m.PCC_imp_z = Var(m.T, bounds=(0,1), within=NonNegativeIntegers)
-m.PCC_EXPORT_kW = Var(m.T, within=NonNegativeReals)
-m.PCC_IMPORT_kW = Var(m.T, within=NonNegativeReals)
-m.ESS_kW = Var(m.T, bounds=(-ESS_kW, ESS_kW), doc='ESS P [kW]')
-m.ESS_kW_charge = Var(m.T, within=NonNegativeReals, doc='ESS P charge [kW]')
-m.ESS_kW_discharge = Var(m.T, within=NonNegativeReals, doc='ESS P discharge [kW]')
-m.ESS_kW_charge_z = Var(m.T, bounds=(0,1), within=NonNegativeIntegers)
-m.ESS_kW_discharge_z = Var(m.T, bounds=(0,1), within=NonNegativeIntegers)
-m.ESS_SoC = Var(m.T, bounds=(0, 100), initialize=ESS_SOC_0, doc='ESS effective SoC [%]',  within=NonNegativeReals)
+def load_params(raw):
+    """Merge defaults into params and validate (A5-IMP R6, R14). Raises ConfigError."""
+    if not isinstance(raw, dict) or not isinstance(raw.get("params"), dict):
+        raise ConfigError("config has no 'params' section")
+    params = dict(DEFAULTS)
+    params.update(raw["params"])
+    missing = [k for k in REQUIRED if params.get(k) in (None, "")]
+    if missing:
+        raise ConfigError(f"missing params: {', '.join(missing)}")
+    checks = [
+        (0 < float(params["essChargeEfficiency"]) <= 1, "essChargeEfficiency must be in (0, 1]"),
+        (0 < float(params["essDischargeEfficiency"]) <= 1, "essDischargeEfficiency must be in (0, 1]"),
+        (float(params["gridTariffEurPerKWh"]) >= 0, "gridTariffEurPerKWh must be >= 0"),
+        (float(params["essDegradationCostEurPerKWh"]) >= 0, "essDegradationCostEurPerKWh must be >= 0"),
+        (float(params["pccLimitPenaltyEurPerKWh"]) >= 0, "pccLimitPenaltyEurPerKWh must be >= 0"),
+        (float(params["endEnergyPenaltyEurPerKWh"]) >= 0, "endEnergyPenaltyEurPerKWh must be >= 0"),
+        (float(params["solverTimeLimitS"]) > 0, "solverTimeLimitS must be > 0"),
+        (float(params["maxInputAgeS"]) > 0, "maxInputAgeS must be > 0"),
+        (int(params["interval"]) > 0, "interval must be > 0"),
+        (int(params["min_period"]) >= 0, "min_period must be >= 0"),
+        (0 <= float(params["ess_min_soc"]) < float(params["ess_max_soc"]) <= 100,
+         "need 0 <= ess_min_soc < ess_max_soc <= 100"),
+        (float(params["pccExportLimitW"]) <= 0, "pccExportLimitW must be <= 0 (export as a negative limit)"),
+        (params["writeDebugFile"] in ("on-failure", "always", "never"),
+         "writeDebugFile must be on-failure, always or never"),
+    ]
+    errors = [msg for ok, msg in checks if not ok]
+    if errors:
+        raise ConfigError("; ".join(errors))
+    if params.get("essMinSafeLim") not in (None, ""):
+        logger.info("param essMinSafeLim is ignored (not used by the model).")
+    return params
 
-# Rules
-def sim_import_export_restrict_rule(m, t):
-    "Prohibit simultaneous PCC export and import"
-    return m.PCC_exp_z[t] + m.PCC_imp_z[t] <= 1
 
-m.sim_import_export_restrict = Constraint(m.T, rule=sim_import_export_restrict_rule)
+def read_value(identifier, param, now=None, max_age_s=None):
+    """Last value of a datapoint, with clear errors (A5-IMP R7). Raises InputError."""
+    dp = query_utils.get_datapoint(identifier)
+    if dp is None:
+        raise InputError(f"reading datapoint '{identifier}' ({param}) failed")
+    if not dp:
+        raise InputError(f"datapoint '{identifier}' ({param}) does not exist")
+    val = dp[0].get("lastReadingValue")
+    if val is None:
+        raise InputError(f"datapoint '{identifier}' ({param}) has no value")
+    if max_age_s is not None:
+        last_time = dp[0].get("lastReadingTime")
+        if not last_time:
+            raise InputError(f"datapoint '{identifier}' ({param}) has no reading time")
+        age = (now - Util.parse_time(last_time)).total_seconds()
+        if age > max_age_s:
+            raise InputError(f"datapoint '{identifier}' ({param}) is {int(age)} s old (max {int(max_age_s)} s)")
+    return float(val)
 
-def pcc_export_kW_rule(m, t):
-    "PCC export calculation"
-    return m.PCC_EXPORT_kW[t] <= -P_exp_lim_kW*m.PCC_exp_z[t]
 
-m.pcc_export = Constraint(m.T, rule=pcc_export_kW_rule)
+def read_forecast(identifier, param):
+    readings = query_utils.get_last_prognosis_readings(identifier)
+    if readings is None:
+        raise InputError(f"reading the forecast of '{identifier}' ({param}) failed")
+    return [{"time": r["time"], "value": r["value"]} for r in readings if r.get("value") is not None]
 
-def pcc_import_kW_rule(m, t):
-    "PCC import calculation"
-    return m.PCC_IMPORT_kW[t] <= P_imp_lim_kW*m.PCC_imp_z[t]
 
-m.pcc_import_kW = Constraint(m.T, rule=pcc_import_kW_rule)
+def build_series(price, load, pv, price_initial, start, interval_s, min_period_s):
+    """Common time grid from start to the end of the shortest forecast (A5-IMP R8).
+    Returns (times, price_eur_mwh, load_kw, pv_kw) or None if the horizon is too short / a forecast is unusable."""
+    if not price or not load or not pv:
+        logger.warning(f"forecast missing: price={len(price)}, load={len(load)}, pv={len(pv)} values")
+        return None
+    end = Util.parse_time(Util.find_common_time_range([price, load, pv])["end"])
+    if (end - start).total_seconds() < min_period_s:
+        logger.warning(f"common forecast horizon {start.isoformat()} .. {end.isoformat()} is shorter than "
+                       f"min_period {min_period_s} s")
+        return None
+    try:
+        price_s = Util.generate_result_series(price, start, end, interval_s, price_initial)
+        load_s = Util.extract_prognosis_values(load, "consumption", start, end, interval_s)
+        pv_s = Util.extract_prognosis_values(pv, "production", start, end, interval_s)
+    except (Util.TaskFailException, ValueError) as e:
+        logger.warning(f"forecast cannot cover the planning window: {e}")
+        return None
+    n = min(len(price_s), len(load_s), len(pv_s))
+    times = [start + timedelta(seconds=k * interval_s) for k in range(n)]
+    return (times,
+            [r["value"] for r in price_s[:n]],
+            [r["value"] / 1000.0 for r in load_s[:n]],
+            [r["value"] / 1000.0 for r in pv_s[:n]])
 
-def sim_charge_discharge_restrict_rule(m, t):
-    "Prohibit ESS simultaneous charging and discharging"
-    return m.ESS_kW_charge_z[t] + m.ESS_kW_discharge_z[t] <= 1
 
-m.sim_charge_discharge_restrict = Constraint(m.T, rule=sim_charge_discharge_restrict_rule)
+def iso(t):
+    return t.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
 
-def ESS_kW_charge_rule(m, t):
-    "ESS charge kW Calculation"
-    return m.ESS_kW_charge[t] <= ESS_kW*m.ESS_kW_charge_z[t]
 
-m.ESS_kW_charging = Constraint(m.T, rule=ESS_kW_charge_rule)
+def post_plan(result_dp_id, start, times, values_w):
+    readings = [{"time": iso(t), "value": float(v)} for t, v in zip(times, values_w)]
+    return query_utils.post_datapoint_prognosis(result_dp_id, iso(start), readings)
 
-def ESS_kW_discharge_rule(m, t):
-    "ESS discharge kW Calculation"
-    return m.ESS_kW_discharge[t] <= ESS_kW*m.ESS_kW_discharge_z[t]
 
-m.ESS_kW_discharging = Constraint(m.T, rule=ESS_kW_discharge_rule)
+def run_fallback(params, start, result_dp_id, reason):
+    """Re-post the remaining part of the previous plan (A5-IMP R11). Returns the exit code."""
+    previous = query_utils.get_last_prognosis_readings(params["essCurrentPowerPlanIdentifier"])
+    remaining = [r for r in (previous or [])
+                 if r.get("value") is not None and Util.parse_time(r["time"]) >= start]
+    if not remaining:
+        logger.error(f"{reason}; no previous plan to fall back on - nothing posted.")
+        return 1
+    readings = [{"time": r["time"], "value": float(r["value"])} for r in remaining]
+    query_utils.post_datapoint_prognosis(result_dp_id, iso(start), readings)
+    logger.warning(f"{reason}; posted the fallback plan ({len(readings)} values from the previous plan).")
+    return 0
 
-def ESS_kW_calc_rule(m, t):
-    "ESS kW Calculation"
-    return m.ESS_kW[t] == m.ESS_kW_charge[t] - m.ESS_kW_discharge[t]
 
-m.ESS_kW_calculation = Constraint(m.T, rule=ESS_kW_calc_rule)
+def run(config_path, now=None):
+    with open(config_path, "r") as f:
+        raw = yaml.safe_load(f)
+    app_name = raw.get("appModule", "a5") if isinstance(raw, dict) else "a5"
+    loki_url = (raw.get("params") or {}).get("lokiUrl", DEFAULTS["lokiUrl"]) if isinstance(raw, dict) else None
+    setup_logger(app_name="A5Runner", log_file="query.log", loki_url=loki_url, loki_tags={"app_name": app_name})
+    logger.info(f"{app_name} start.")
 
-def ess_SoC_rule(m, t):
-    "ESS SOC Calculation"
-    if t >= 1:
-        return m.ESS_SoC[t] == m.ESS_SoC[t-1] + ((m.ESS_kW[t-1]*kW_to_kWh)/ESS_eff_kWh)*100
-    else:
-        return m.ESS_SoC[t] == ESS_SOC_0
+    try:
+        params = load_params(raw)
+    except (ConfigError, ValueError, TypeError) as e:
+        logger.error(f"configuration error: {e}")
+        return 1
 
-m.ess_SoC_const = Constraint(m.T, rule=ess_SoC_rule)
+    query_utils.init(params["apiEndpoint"], {})
+    jwt_token = query_utils.get_token(params["clientId"], params["token"])
+    if not jwt_token:
+        logger.error(f"{app_name}: could not obtain an API token from {params['apiEndpoint']}/auth/token "
+                     f"for clientId '{params['clientId']}' (check the credential in the app config). Stopping.")
+        return 1
+    query_utils.add_header("Authorization", f"Bearer {jwt_token}")
 
-def soc_end_target_rule(m):
-    "End SoC value"
-    return m.ESS_SoC[len(m.ESS_SoC)-1] + ((m.ESS_kW[len(m.ESS_SoC)-1]*kW_to_kWh)/ESS_eff_kWh)*100 == ESS_SOC_END
+    now = now or datetime.now(timezone.utc)
+    interval_s = int(params["interval"])
+    start = Util.align_start(now, interval_s)
 
-m.soc_end_target = Constraint(rule=soc_end_target_rule)
+    try:
+        result_dp = query_utils.get_datapoint(params["essResultPowerPlanIdentifier"])
+        if not result_dp:
+            raise InputError(f"result datapoint '{params['essResultPowerPlanIdentifier']}' does not exist")
+        result_dp_id = result_dp[0]["id"]
+        p_max_kw = read_value(params["ess_max_P_dp_id"], "ess_max_P_dp_id") / 1000.0
+        capacity_kwh = read_value(params["ess_max_E_dp_id"], "ess_max_E_dp_id") / 1000.0
+        e0_kwh = read_value(params["ess_charge_dp_id"], "ess_charge_dp_id",
+                            now=now, max_age_s=float(params["maxInputAgeS"])) / 1000.0
+        end_id = params.get("essEffectiveEndCharge")
+        e_end_kwh = (read_value(end_id, "essEffectiveEndCharge") / 1000.0) if end_id else e0_kwh
+        if p_max_kw <= 0 or capacity_kwh <= 0:
+            raise InputError(f"ESS power limit ({p_max_kw} kW) and capacity ({capacity_kwh} kWh) must be > 0")
+        price_dp = query_utils.get_datapoint(params["npPriceIdentifier"])
+        price_initial = price_dp[0].get("lastReadingValue") if price_dp else None
+        price = read_forecast(params["npPriceIdentifier"], "npPriceIdentifier")
+        load = read_forecast(params["consumptionPrognosisIdentifier"], "consumptionPrognosisIdentifier")
+        pv = read_forecast(params["productionPrognosisIdentifier"], "productionPrognosisIdentifier")
+    except InputError as e:
+        logger.error(f"input error: {e}")
+        return 1
 
-def pcc_self_consumption_rule(m, t):
-    return m.PCC_IMPORT_kW[t] - m.PCC_EXPORT_kW[t] == m.P_kW[t] + m.PV_kW[t] + m.ESS_kW[t]
+    if price_initial is None and price:
+        price_initial = sorted(price, key=lambda r: Util.parse_time(r["time"]))[0]["value"]
+    logger.info(f"inputs: Pmax={p_max_kw} kW, capacity={capacity_kwh} kWh, E0={e0_kwh:.1f} kWh "
+                f"(SoC {100 * e0_kwh / capacity_kwh:.1f} %), Eend={e_end_kwh:.1f} kWh, "
+                f"forecast values price/load/pv={len(price)}/{len(load)}/{len(pv)}, start={iso(start)}")
 
-m.pcc_self_consumption = Constraint(m.T, rule=pcc_self_consumption_rule)
+    series = build_series(price, load, pv, price_initial, start, interval_s, int(params["min_period"]))
+    if series is None:
+        return run_fallback(params, start, result_dp_id, "not enough forecast data")
+    times, price_s, load_s, pv_s = series
 
-########################################################################
-# Cost function and optimization objective
-########################################################################
+    inp = a5model.PlanInputs(
+        interval_s=interval_s, load_kw=load_s, pv_kw=pv_s, price_eur_mwh=price_s,
+        p_max_kw=p_max_kw, capacity_kwh=capacity_kwh, e0_kwh=e0_kwh, e_end_kwh=e_end_kwh,
+        soc_min_pct=float(params["ess_min_soc"]), soc_max_pct=float(params["ess_max_soc"]),
+        import_limit_kw=float(params["pccImportLimitW"]) / 1000.0,
+        export_limit_kw=-float(params["pccExportLimitW"]) / 1000.0,
+        eta_charge=float(params["essChargeEfficiency"]), eta_discharge=float(params["essDischargeEfficiency"]),
+        grid_tariff_eur_kwh=float(params["gridTariffEurPerKWh"]),
+        degradation_eur_kwh=float(params["essDegradationCostEurPerKWh"]),
+        pcc_penalty_eur_kwh=float(params["pccLimitPenaltyEurPerKWh"]),
+        end_penalty_eur_kwh=float(params["endEnergyPenaltyEurPerKWh"]),
+    )
+    m = a5model.build_model(inp)
+    result = a5model.solve(m, time_limit_s=float(params["solverTimeLimitS"]))
+    if params["writeDebugFile"] == "always" or (params["writeDebugFile"] == "on-failure" and not result.ok):
+        debug_model(m)
+    if not result.ok:
+        return run_fallback(params, start, result_dp_id, f"solver result {result.status}")
 
-# Value constants
-ESS_DEG_COST = 0.05
-GRID_TARIFF_COMPONENT = 0.05
+    logger.info(f"solved ({result.status}): {len(times)} steps {iso(times[0])} .. {iso(times[-1])}, "
+                f"cost {result.cost_eur:.2f} EUR, end energy {result.energy_kwh[-1]:.1f} kWh")
+    if result.import_overrun_kwh > 1e-6 or result.export_overrun_kwh > 1e-6:
+        logger.warning(f"plan exceeds the PCC limits: import {result.import_overrun_kwh:.2f} kWh, "
+                       f"export {result.export_overrun_kwh:.2f} kWh over the horizon")
+    if abs(result.end_deviation_kwh) > 1e-6:
+        logger.warning(f"end energy misses its target by {result.end_deviation_kwh:.2f} kWh")
+    post_plan(result_dp_id, start, times, [v * 1000.0 for v in result.ess_kw])
+    logger.info(f"{app_name} finished: plan posted to '{params['essResultPowerPlanIdentifier']}'.")
+    return 0
 
-# Cost function
-cost = sum(( (m.PCC_IMPORT_kW[t]/1000)*kW_to_kWh*(m.SPOT_EUR_kWh[t]/1000 + GRID_TARIFF_COMPONENT) - 
-            (m.PCC_EXPORT_kW[t]/1000)*kW_to_kWh*m.SPOT_EUR_kWh[t]/1000 + 
-            (m.ESS_kW_charge[t]/1000)*kW_to_kWh*ESS_DEG_COST ) for t in m.T) #
-m.objective = Objective(expr = cost, sense=minimize)
 
-########################################################################
-# Solve
-# ######################################################################
-solver = SolverFactory('glpk', options={'tmlim': 300})
-results = solver.solve(m)
-results.write()
+def main(argv=None):
+    parser = argparse.ArgumentParser(description="Run A5 with config file")
+    parser.add_argument("-c", "--config", required=False, help="Path to config YAML file", default="/app/config.yaml")
+    args = parser.parse_args(argv)
+    try:
+        return run(args.config)
+    except Exception:  # last resort: a clear message instead of a bare traceback
+        logger.exception("A5 failed with an unexpected error")
+        return 1
 
-# Debug the model to log infeasible constraints, variable values, and constraint statuses 
-# and save diagnostic output to a file
-debug_model(m)
 
-# results_path = Path(f"results_{start_time.strftime('%Y.%m.%d_%H.%M.%S')}.json").resolve()
-
-# Check that the solver completed successfully with an optimal or feasible result
-if (results.solver.status == SolverStatus.ok) and (
-    (results.solver.termination_condition == TerminationCondition.optimal) 
-    or (results.solver.termination_condition == TerminationCondition.feasible)
-    ):
-    # Format results as data frame
-    results_df = model_to_df(m)
-    
-    # # Save to JSON
-    # try:
-    #     results_df.to_json(results_path, orient="records", indent=2)
-    #     logger.info(f"Results saved to {results_path.resolve()}")
-    # except Exception as e:
-    #     logger.error(f"Failed to save results to JSON: {e}")
-    
-    # Use the variable from 'results_df' if available;  
-    # otherwise, fall back to the previous prognosis and readings.
-    if (len(results_df) == 0):
-        # Use old prognosis, if it exists
-        logger.warning(f"Optimization failed - empty result. Using old power prognosis.")
-        essPowerPrognosisRaw = [r["value"] for r in query_utils.get_last_prognosis_readings(current_dp_id)]
-    else:
-        # use optimized results
-        essPowerPrognosisRaw = results_df["ESS"].values * 1000
-        
-    # Create a list of prognosis readings with corresponding timestamps
-    essPowerPlanned =[]
-    for i, value in enumerate(essPowerPrognosisRaw):
-        reading_time = start_time + timedelta(seconds=i * interval)  
-        essPowerPlanned.append({
-            "time": reading_time.isoformat().replace('+00:00', 'Z'),
-            "value": value
-        })
-
-    # Construct the prognosis payload with datapoint ID, timestamp, and planned ESS power readings
-    prognosis_payload = {
-        "datapointId": result_dp_id,
-        "time": start_time.isoformat().replace('+00:00', 'Z'),
-        "readings":essPowerPlanned
-    }
-    # POST datapoint prognosis and prognosis readings
-    response = query_utils.post_datapoint_prognosis(prognosis_payload)
-    logger.info(f"datapoint prognosis was posted: {response}")
-        
-else: 
-    logger.error(f"Solver failed - empty result")
-
-logger.info(f"{app_name} finished")
+if __name__ == "__main__":
+    sys.exit(main())

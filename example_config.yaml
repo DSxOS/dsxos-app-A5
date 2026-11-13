@@ -10,17 +10,17 @@ cron: "10 */15 * * * *" # Execution every 15 minutes at 10'th second
 logLevel: 4             # Logging level
 params:
   apiEndpoint: "http://localhost:8080/api"  # API endpoint to call
-  token: "Bearer YOUR_TOKEN"                # Authorization token (replace with real one)
-  clientId: "api-client-id"                 # API client ID matching token (replace with real one)
+  token: "YOUR_CLIENT_SECRET"               # API credential secret; exchanged for a short-lived token (client_credentials)
+  clientId: "api-client-id"                 # API credential client ID (Monitoring > API credentials)
   ess_max_P_dp_id: "ess_max_P"              # Storage capacity for SOC calculation
-  ess_charge_dp_id: "ess_charge"            # effective storage charge at the beginning of optimization(may be negative)
-  essEffectiveEndCharge: "ess_charge"       # effective charge of the storage device at the end of optimization 
+  ess_charge_dp_id: "ess_charge"            # total stored energy now, Wh
+  essEffectiveEndCharge: "ess_charge"       # optional: target stored energy at the end, Wh (default: start energy)
   ess_max_E_dp_id: "ess_max_E"              # ESS max charge
   pccImportLimitW: 55000                    # PCC limit energy import
   pccExportLimitW: -1000000                 # PCC limit power export
   ess_min_soc: 15                           # Minimum SOC allowed for peak shaving
   ess_max_soc: 90                           # Maximum SOC allowed for peak shaving
-  essMinSafeLim: "ess_min_batt_safe_lim"
+  # essMinSafeLim is no longer used (ignored if present)
   # essMinSafeLim: 
   #   expression: x
   #   expressionMap:
