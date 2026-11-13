@@ -32,3 +32,12 @@ Ensure example_config.yaml is configured, then run:
 ```bash
 python main.py
 ```
+
+## API credentials
+
+A5 authenticates like A4: create an API credential for the app on the site (Monitoring, API credentials) and put its
+client ID in `params.clientId` and its secret in `params.token`. On every run A5 exchanges them at
+`<apiEndpoint>/auth/token` (`grant_type=client_credentials`) for a short-lived token. If that fails, A5 logs the
+reason and stops before reading any data. A pasted Bearer token no longer works (it expires after about an hour).
+
+The optimisation uses the GLPK solver (`glpsol`); `packages.txt` installs it (`glpk-utils`) in the platform image.

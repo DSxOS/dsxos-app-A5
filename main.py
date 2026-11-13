@@ -4,6 +4,7 @@ import pandas as pd
 import query_utils
 from pathlib import Path
 import argparse
+import sys
 import yaml
 from datetime import datetime, timezone
 from datetime import timedelta
@@ -18,14 +19,15 @@ args = parser.parse_args() # Read arguments
 with open(args.config, "r") as f: # Open and read config-file
     raw_data = yaml.safe_load(f)
     
-# Extract API URL and Token
+# Extract API URL and credential (clientId + secret; the secret is configured as 'token', same as A4)
 api_url = raw_data["params"]["apiEndpoint"]
 api_token = raw_data["params"]["token"]
-api_headers = {"Authorization": api_token}
+client_id = raw_data["params"]["clientId"]
+api_headers = {}
 
 app_name = raw_data["appModule"]
 
-# Initialize query_utils with URL + headers    
+# Initialize query_utils with URL + headers
 query_utils.init(api_url, api_headers)
 logger = setup_logger(
     log_file="query.log",
@@ -35,6 +37,14 @@ logger = setup_logger(
 )
 
 logger.info(f"{app_name} start.")
+
+# Obtain a short-lived JWT before any data request (client_credentials).
+jwt_token = query_utils.get_token(client_id, api_token)
+if not jwt_token:
+    logger.error(f"{app_name}: could not obtain an API token from {api_url}/auth/token "
+                 f"for clientId '{client_id}' (check the credential in the app config). Stopping.")
+    sys.exit(1)
+query_utils.add_header("Authorization", f"Bearer {jwt_token}")
 
 start_time = datetime.now(timezone.utc)
 

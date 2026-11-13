@@ -16,7 +16,25 @@ def init(url, headers):
 # Helper to create Query object
 def Q():
     return Query(_query_url, headers=_query_headers)
-    
+
+def add_header(key, value):
+    global _query_headers
+    if _query_headers is None:
+        _query_headers = {}
+    _query_headers[key] = value
+
+# Exchange the API credential for a short-lived JWT (client_credentials, same as A4).
+# Returns the access token, or None if the request failed or returned no token.
+def get_token(client_id, client_secret):
+    token_data = Q()._request("POST", "/auth/token", data={
+        "grant_type": "client_credentials",
+        "client_id": client_id,
+        "client_secret": client_secret,
+    })
+    if not token_data or "access_token" not in token_data:
+        return None
+    return token_data["access_token"]
+
 ###########################################################
 # GET
 ###########################################################
