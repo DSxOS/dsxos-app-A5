@@ -1,38 +1,19 @@
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import List, Dict, Union
-import math
+
 
 class TaskFailException(Exception):
-    """Exception for use in forecast validation."""
+    """A forecast cannot provide a value for the planning window."""
     pass
 
-def calculate_count(prs, start, interval_seconds):
-    if not prs:
-        return 0
 
-    first_time = datetime.fromisoformat(prs[0]["time"]) #.replace("+00:00", "Z"))
-    start_difference = int((first_time - start).total_seconds())
-    print(f"first_time: {first_time} --- start: {start} --- start difference: {start_difference}")
-    if start_difference > 0: 
-        count = len(prs) * (3600 // interval_seconds) + math.ceil(start_difference / interval_seconds)
-    else: 
-        count = 0
-    return count
+def align_start(now: datetime, interval_s: int) -> datetime:
+    """Round a time down to a multiple of interval_s since the UTC epoch (A5-IMP R8)."""
+    if interval_s <= 0:
+        raise ValueError("interval must be positive")
+    epoch_s = int(now.astimezone(timezone.utc).timestamp())
+    return datetime.fromtimestamp(epoch_s - epoch_s % interval_s, tz=timezone.utc)
 
-def validate_inputs(prs: List[Dict[str, Union[str, datetime, float]]], 
-                    start: datetime, interval: int, count: int, initial: float):
-    if not isinstance(prs, list):
-        raise TypeError("prs must be list")
-    if not all(isinstance(r, dict) for r in prs):
-        raise TypeError("prs elements must be dict's")
-    if not isinstance(start, datetime):
-        raise TypeError("start must be datetime object")
-    if not isinstance(interval, int) or interval <= 0:
-        raise ValueError("interval must be positive integer")
-    if not isinstance(count, int) or count <= 0:
-        raise ValueError("count must be positive integer")
-    if not isinstance(initial, (int, float)):
-        raise TypeError("initial must be number")
 
 def parse_time(time_val: Union[str, datetime]) -> datetime:
     if isinstance(time_val, datetime):
@@ -120,11 +101,11 @@ def extract_prognosis_values(
             current_idx += 1
 
         if prs[current_idx]["time"] <= expected_time:
-            value = prs[current_idx]["value"]
+            val = prs[current_idx]["value"]
         else:
             raise TaskFailException(f"No valid {label} value for time {expected_time}")
 
-        result.append({"time": expected_time, "value": value})
+        result.append({"time": expected_time, "value": val})
 
     return result
 
@@ -143,8 +124,8 @@ def find_common_time_range(series_list: List[List[Dict[str, str]]]) -> Dict[str,
 
     for series in series_list:
         if not series:
-            continue  # ignoreeri tühje seeriaid
-        times = [datetime.fromisoformat(point["time"]) for point in series]
+            continue  # ignore empty series
+        times = [parse_time(point["time"]) for point in series]
         min_starts.append(min(times))
         max_ends.append(max(times))
 

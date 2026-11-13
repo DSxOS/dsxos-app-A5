@@ -167,3 +167,8 @@ app/orchestrator/src/main/resources/enabled_datapoints.yml
 # win wsl copy
 ##############################
 *Zone.Identifier
+# runtime output
+debug_output.txt
+query.log
+__pycache__/
+.pytest_cache/
