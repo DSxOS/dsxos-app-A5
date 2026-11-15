@@ -30,6 +30,7 @@ class PlanInputs:
     degradation_eur_kwh: float = 0.05
     pcc_penalty_eur_kwh: float = 10.0
     end_penalty_eur_kwh: float = 1.0
+    ramp_penalty_eur_kw: float = 0.0001  # per kW of ESS power change between steps (A5-AF)
 
 
 @dataclass
@@ -42,6 +43,7 @@ class PlanResult:
     export_overrun_kwh: float = 0.0
     end_deviation_kwh: float = 0.0
     cost_eur: Optional[float] = None
+    ramp_cost_eur: float = 0.0
 
 
 def energy_bounds(inp: PlanInputs):
@@ -102,7 +104,16 @@ def build_model(inp: PlanInputs) -> pyo.ConcreteModel:
     m.dev_down = pyo.Var(domain=pyo.NonNegativeReals)
     m.end_target = pyo.Constraint(expr=m.E[n] - e_end == m.dev_up - m.dev_down)
 
-    # Cost in EUR (R5)
+    # Ramp of the ESS power between consecutive steps (A5-AF R1): breaks ties inside constant-price slots
+    m.TR = pyo.Set(initialize=list(range(1, n)))
+    m.ramp = pyo.Var(m.TR, domain=pyo.NonNegativeReals)
+    m.ramp_up = pyo.Constraint(m.TR, rule=lambda m, t:
+                               m.ramp[t] >= (m.ch[t] - m.dis[t]) - (m.ch[t - 1] - m.dis[t - 1]))
+    m.ramp_down = pyo.Constraint(m.TR, rule=lambda m, t:
+                                 m.ramp[t] >= (m.ch[t - 1] - m.dis[t - 1]) - (m.ch[t] - m.dis[t]))
+    m.ramp_cost = pyo.Expression(expr=sum(m.ramp[t] for t in m.TR) * inp.ramp_penalty_eur_kw)
+
+    # Cost in EUR (R5; A5-AF R2: ramp term per kW of change, not scaled by dt)
     def cost(m):
         energy_cost = sum(
             dt_h * (m.imp[t] * (inp.price_eur_mwh[t] / 1000.0 + inp.grid_tariff_eur_kwh)
@@ -110,7 +121,7 @@ def build_model(inp: PlanInputs) -> pyo.ConcreteModel:
                     + m.ch[t] * inp.degradation_eur_kwh
                     + (m.o_imp[t] + m.o_exp[t]) * inp.pcc_penalty_eur_kwh)
             for t in m.T)
-        return energy_cost + (m.dev_up + m.dev_down) * inp.end_penalty_eur_kwh
+        return energy_cost + (m.dev_up + m.dev_down) * inp.end_penalty_eur_kwh + m.ramp_cost
     m.cost = pyo.Objective(rule=cost, sense=pyo.minimize)
     return m
 
@@ -140,4 +151,5 @@ def solve(m: pyo.ConcreteModel, time_limit_s: float = 300, solver_name: str = "g
         export_overrun_kwh=sum(pyo.value(m.o_exp[t]) for t in m.T) * m.dt_h,
         end_deviation_kwh=pyo.value(m.dev_up) - pyo.value(m.dev_down),
         cost_eur=pyo.value(m.cost),
+        ramp_cost_eur=pyo.value(m.ramp_cost),
     )

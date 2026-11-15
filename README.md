@@ -37,7 +37,8 @@ Per time step k (length `interval`):
 - **End:** the energy at the end should equal the start energy, or the value of `essEffectiveEndCharge` if that is set
   (soft, `endEnergyPenaltyEurPerKWh`).
 - **Cost (EUR), minimised:** import · (price + grid tariff) − export · price + charged energy · degradation cost +
-  penalties.
+  penalties + Σ |ESS power change between steps| · `essRampPenaltyEurPerKw`. The small ramp term breaks ties inside
+  constant-price slots, so the plan is flat instead of flickering on/off (A5-AF).
 
 The time grid starts at the run time rounded down to `interval` and ends with the shortest forecast. If that is
 shorter than `min_period`, or the solver gives no usable result, A5 re-posts the remaining part of the previous plan
@@ -68,6 +69,7 @@ shorter than `min_period`, or the solver gives no usable result, A5 re-posts the
 | `essDegradationCostEurPerKWh` | EUR/kWh | 0.05 | Cost per kWh charged |
 | `pccLimitPenaltyEurPerKWh` | EUR/kWh | 10 | Penalty for exceeding the PCC limits |
 | `endEnergyPenaltyEurPerKWh` | EUR/kWh | 1 | Penalty for missing the end energy |
+| `essRampPenaltyEurPerKw` | EUR/kW | 0.0001 | Cost per kW of ESS power change between consecutive steps (not scaled by `interval`); 0 = off |
 | `solverTimeLimitS` | s | 300 | GLPK time limit |
 | `maxInputAgeS` | s | 900 | Maximum age of the stored-energy reading |
 | `lokiUrl` | URL | `http://localhost:3100/loki/api/v1/push` | Loki push URL; empty = no Loki logging |
