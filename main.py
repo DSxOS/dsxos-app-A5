@@ -1,7 +1,8 @@
 """A5 economic optimisation: plans the ESS power for the coming forecast horizon at minimum energy cost (EUR).
 
 Run by the platform's python-app scheduler with the site's config (default /app/config.yaml).
-Requirements: docs/requirements-a5-improvements.md (A5-IMP), docs/requirements-client-credentials-glpk.md (A5-AUTH).
+Requirements: docs/requirements-a5-improvements.md (A5-IMP), docs/requirements-a5-anti-flicker.md (A5-AF),
+docs/requirements-client-credentials-glpk.md (A5-AUTH).
 Exit codes: 0 = plan (or fallback plan) posted, 1 = configuration/input error or no plan possible.
 """
 import argparse
@@ -26,6 +27,7 @@ DEFAULTS = {
     "essDegradationCostEurPerKWh": 0.05,
     "pccLimitPenaltyEurPerKWh": 10.0,
     "endEnergyPenaltyEurPerKWh": 1.0,
+    "essRampPenaltyEurPerKw": 0.0001,
     "solverTimeLimitS": 300,
     "maxInputAgeS": 900,
     "lokiUrl": "http://localhost:3100/loki/api/v1/push",
@@ -65,6 +67,7 @@ def load_params(raw):
         (float(params["essDegradationCostEurPerKWh"]) >= 0, "essDegradationCostEurPerKWh must be >= 0"),
         (float(params["pccLimitPenaltyEurPerKWh"]) >= 0, "pccLimitPenaltyEurPerKWh must be >= 0"),
         (float(params["endEnergyPenaltyEurPerKWh"]) >= 0, "endEnergyPenaltyEurPerKWh must be >= 0"),
+        (float(params["essRampPenaltyEurPerKw"]) >= 0, "essRampPenaltyEurPerKw must be >= 0"),
         (float(params["solverTimeLimitS"]) > 0, "solverTimeLimitS must be > 0"),
         (float(params["maxInputAgeS"]) > 0, "maxInputAgeS must be > 0"),
         (int(params["interval"]) > 0, "interval must be > 0"),
@@ -229,6 +232,7 @@ def run(config_path, now=None):
         degradation_eur_kwh=float(params["essDegradationCostEurPerKWh"]),
         pcc_penalty_eur_kwh=float(params["pccLimitPenaltyEurPerKWh"]),
         end_penalty_eur_kwh=float(params["endEnergyPenaltyEurPerKWh"]),
+        ramp_penalty_eur_kw=float(params["essRampPenaltyEurPerKw"]),
     )
     m = a5model.build_model(inp)
     result = a5model.solve(m, time_limit_s=float(params["solverTimeLimitS"]))
@@ -238,7 +242,7 @@ def run(config_path, now=None):
         return run_fallback(params, start, result_dp_id, f"solver result {result.status}")
 
     logger.info(f"solved ({result.status}): {len(times)} steps {iso(times[0])} .. {iso(times[-1])}, "
-                f"cost {result.cost_eur:.2f} EUR, end energy {result.energy_kwh[-1]:.1f} kWh")
+                f"cost {result.cost_eur:.2f} EUR (ramp {result.ramp_cost_eur:.4f}), end energy {result.energy_kwh[-1]:.1f} kWh")
     if result.import_overrun_kwh > 1e-6 or result.export_overrun_kwh > 1e-6:
         logger.warning(f"plan exceeds the PCC limits: import {result.import_overrun_kwh:.2f} kWh, "
                        f"export {result.export_overrun_kwh:.2f} kWh over the horizon")

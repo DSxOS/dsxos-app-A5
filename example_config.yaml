@@ -32,4 +32,5 @@ params:
   essResultPowerPlanIdentifier: "ess_p_lt_a5"         # Result prognosis
   interval: 900                                       # 15 min
   min_period: 21600                                   # 6 h, minimum period of data needed
+  essRampPenaltyEurPerKw: 0.0001                      # optional: EUR per kW of ESS power change between steps (anti-flicker); 0 = off
 

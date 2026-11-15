@@ -80,3 +80,44 @@ def test_import_export_binaries_only_with_negative_prices():
 def test_negative_price_case_solves():
     r = solve(inputs(price_eur_mwh=[-50.0] * 4 + [300.0] * 4))
     assert r.ok
+
+
+# --- A5-AF anti-flicker (AC1 a, b) ---------------------------------------------------------------------------------
+
+def flicker_inputs(ramp):
+    """F2 shape: 60 s steps, one 30-step cheap slot between dearer slots, PCC import limit binding at full charge,
+    the end target needs about half of the cheap slot at full power."""
+    import math
+    n = 90
+    load = [90.0 + 3.0 * math.sin(1.7 * i) for i in range(n)]
+    price = [50.0] * 30 + [10.0] * 30 + [50.0] * 30
+    # max charge in the slot ~ 170 - 90 = 80 kW; 15 min at 80 kW, stored with eta 0.95 = 19 kWh
+    return inputs(interval_s=60, load_kw=load, pv_kw=[0.0] * n, price_eur_mwh=price, p_max_kw=200.0,
+                  capacity_kwh=100.0, e0_kwh=50.0, e_end_kwh=69.0, import_limit_kw=170.0,
+                  grid_tariff_eur_kwh=0.05, degradation_eur_kwh=0.05,    # A5 defaults, as on NRG: no arbitrage
+                  ramp_penalty_eur_kw=ramp)
+
+
+def jumps(r, threshold_kw=1.0):
+    return sum(1 for a, b in zip(r.ess_kw, r.ess_kw[1:]) if abs(b - a) > threshold_kw)
+
+
+def test_fixture_reproduces_the_flicker_without_ramp_penalty():
+    r = solve(flicker_inputs(0.0))
+    assert abs(r.energy_kwh[-1] - 69.0) < 1e-3
+    assert jumps(r) > 2, r.ess_kw
+
+
+def test_ramp_penalty_gives_a_flat_plan():
+    r = solve(flicker_inputs(0.0001))
+    assert abs(r.energy_kwh[-1] - 69.0) < 1e-3
+    assert jumps(r) <= 2, r.ess_kw
+    assert all(abs(p) < 1e-6 for p in r.ess_kw[:30] + r.ess_kw[60:])    # charging only in the cheap slot
+    assert r.ramp_cost_eur > 0
+
+
+def test_ramp_penalty_has_small_economic_impact():
+    off = solve(flicker_inputs(0.0))
+    on = solve(flicker_inputs(0.0001))
+    assert off.ramp_cost_eur == 0
+    assert (on.cost_eur - on.ramp_cost_eur) - off.cost_eur <= 0.01
