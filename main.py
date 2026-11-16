@@ -2,6 +2,7 @@
 
 Run by the platform's python-app scheduler with the site's config (default /app/config.yaml).
 Requirements: docs/requirements-a5-improvements.md (A5-IMP), docs/requirements-a5-anti-flicker.md (A5-AF),
+docs/requirements-opd-operational-datapoints.md (OPD: operational params as number or datapoint),
 docs/requirements-client-credentials-glpk.md (A5-AUTH).
 Exit codes: 0 = plan (or fallback plan) posted, 1 = configuration/input error or no plan possible.
 """
@@ -37,9 +38,20 @@ DEFAULTS = {
 REQUIRED = [
     "apiEndpoint", "clientId", "token",
     "npPriceIdentifier", "consumptionPrognosisIdentifier", "productionPrognosisIdentifier",
-    "ess_max_P_dp_id", "ess_charge_dp_id", "ess_max_E_dp_id",
+    "ess_max_P_charge_dp_id", "ess_max_P_discharge_dp_id", "ess_charge_dp_id", "ess_max_E_dp_id",
     "pccImportLimitW", "pccExportLimitW", "ess_min_soc", "ess_max_soc",
     "essResultPowerPlanIdentifier", "essCurrentPowerPlanIdentifier", "interval", "min_period",
+]
+# Removed or replaced params (OPD R5): present in the config = configuration error naming the replacement.
+REMOVED = {
+    "essMinSafeLim": "removed (not used by the model); delete it",
+    "ess_max_P_dp_id": "replaced by ess_max_P_charge_dp_id and ess_max_P_discharge_dp_id",
+    "essPowerLimitW": "replaced by ess_max_P_charge_dp_id and ess_max_P_discharge_dp_id",
+}
+# OPD operational params: a number (constant) or a non-empty string (datapoint identifier, latest value per run).
+OPERATIONAL = [
+    "pccImportLimitW", "pccExportLimitW", "ess_min_soc", "ess_max_soc",
+    "ess_max_P_charge_dp_id", "ess_max_P_discharge_dp_id", "ess_max_E_dp_id",
 ]
 
 
@@ -55,6 +67,9 @@ def load_params(raw):
     """Merge defaults into params and validate (A5-IMP R6, R14). Raises ConfigError."""
     if not isinstance(raw, dict) or not isinstance(raw.get("params"), dict):
         raise ConfigError("config has no 'params' section")
+    stale = [f"{k}: {why}" for k, why in REMOVED.items() if k in raw["params"]]
+    if stale:
+        raise ConfigError("removed or replaced params in the config: " + "; ".join(stale))
     params = dict(DEFAULTS)
     params.update(raw["params"])
     missing = [k for k in REQUIRED if params.get(k) in (None, "")]
@@ -72,17 +87,16 @@ def load_params(raw):
         (float(params["maxInputAgeS"]) > 0, "maxInputAgeS must be > 0"),
         (int(params["interval"]) > 0, "interval must be > 0"),
         (int(params["min_period"]) >= 0, "min_period must be >= 0"),
-        (0 <= float(params["ess_min_soc"]) < float(params["ess_max_soc"]) <= 100,
-         "need 0 <= ess_min_soc < ess_max_soc <= 100"),
-        (float(params["pccExportLimitW"]) <= 0, "pccExportLimitW must be <= 0 (export as a negative limit)"),
         (params["writeDebugFile"] in ("on-failure", "always", "never"),
          "writeDebugFile must be on-failure, always or never"),
     ]
+    for k in OPERATIONAL:
+        v = params[k]
+        if isinstance(v, bool) or not (isinstance(v, (int, float)) or (isinstance(v, str) and v.strip())):
+            raise ConfigError(f"{k} must be a number or a datapoint identifier")
     errors = [msg for ok, msg in checks if not ok]
     if errors:
         raise ConfigError("; ".join(errors))
-    if params.get("essMinSafeLim") not in (None, ""):
-        logger.info("param essMinSafeLim is ignored (not used by the model).")
     return params
 
 
@@ -104,6 +118,35 @@ def read_value(identifier, param, now=None, max_age_s=None):
         if age > max_age_s:
             raise InputError(f"datapoint '{identifier}' ({param}) is {int(age)} s old (max {int(max_age_s)} s)")
     return float(val)
+
+
+def value_or_datapoint(params, name):
+    """Operational parameter (OPD R1): a number is a constant; a string is a datapoint whose latest value is read
+    (no staleness check: operator setpoint). Returns (value, source) with source 'const' or 'dp <id>'."""
+    v = params[name]
+    if isinstance(v, str):
+        return read_value(v.strip(), name), f"dp {v.strip()}"
+    return float(v), "const"
+
+
+def validate_operational(vals, srcs):
+    """OPD R2 on the resolved values (W, Wh, %). A violation is an input error if a datapoint is involved in it,
+    otherwise a configuration error."""
+    rules = [
+        (["ess_max_P_charge_dp_id"], vals["ess_max_P_charge_dp_id"] > 0, "ess_max_P_charge_dp_id must be > 0"),
+        (["ess_max_P_discharge_dp_id"], vals["ess_max_P_discharge_dp_id"] > 0, "ess_max_P_discharge_dp_id must be > 0"),
+        (["ess_max_E_dp_id"], vals["ess_max_E_dp_id"] > 0, "ess_max_E_dp_id must be > 0"),
+        (["ess_min_soc", "ess_max_soc"], 0 <= vals["ess_min_soc"] < vals["ess_max_soc"] <= 100,
+         "need 0 <= ess_min_soc < ess_max_soc <= 100"),
+        (["pccExportLimitW", "pccImportLimitW"], vals["pccExportLimitW"] <= vals["pccImportLimitW"],
+         "need pccExportLimitW <= pccImportLimitW"),
+    ]
+    for names, ok, msg in rules:
+        if not ok:
+            detail = ", ".join(f"{n}={vals[n]} ({srcs[n]})" for n in names)
+            if any(srcs[n] != "const" for n in names):
+                raise InputError(f"{msg}: {detail}")
+            raise ConfigError(f"{msg}: {detail}")
 
 
 def read_forecast(identifier, param):
@@ -193,14 +236,17 @@ def run(config_path, now=None):
         if not result_dp:
             raise InputError(f"result datapoint '{params['essResultPowerPlanIdentifier']}' does not exist")
         result_dp_id = result_dp[0]["id"]
-        p_max_kw = read_value(params["ess_max_P_dp_id"], "ess_max_P_dp_id") / 1000.0
-        capacity_kwh = read_value(params["ess_max_E_dp_id"], "ess_max_E_dp_id") / 1000.0
+        vals, srcs = {}, {}
+        for name in OPERATIONAL:
+            vals[name], srcs[name] = value_or_datapoint(params, name)
+        validate_operational(vals, srcs)
+        p_charge_kw = vals["ess_max_P_charge_dp_id"] / 1000.0
+        p_discharge_kw = vals["ess_max_P_discharge_dp_id"] / 1000.0
+        capacity_kwh = vals["ess_max_E_dp_id"] / 1000.0
         e0_kwh = read_value(params["ess_charge_dp_id"], "ess_charge_dp_id",
                             now=now, max_age_s=float(params["maxInputAgeS"])) / 1000.0
         end_id = params.get("essEffectiveEndCharge")
         e_end_kwh = (read_value(end_id, "essEffectiveEndCharge") / 1000.0) if end_id else e0_kwh
-        if p_max_kw <= 0 or capacity_kwh <= 0:
-            raise InputError(f"ESS power limit ({p_max_kw} kW) and capacity ({capacity_kwh} kWh) must be > 0")
         price_dp = query_utils.get_datapoint(params["npPriceIdentifier"])
         price_initial = price_dp[0].get("lastReadingValue") if price_dp else None
         price = read_forecast(params["npPriceIdentifier"], "npPriceIdentifier")
@@ -209,10 +255,14 @@ def run(config_path, now=None):
     except InputError as e:
         logger.error(f"input error: {e}")
         return 1
+    except ConfigError as e:
+        logger.error(f"configuration error: {e}")
+        return 1
 
     if price_initial is None and price:
         price_initial = sorted(price, key=lambda r: Util.parse_time(r["time"]))[0]["value"]
-    logger.info(f"inputs: Pmax={p_max_kw} kW, capacity={capacity_kwh} kWh, E0={e0_kwh:.1f} kWh "
+    logger.info("inputs: " + ", ".join(f"{n}={vals[n]:g} ({srcs[n]})" for n in OPERATIONAL))
+    logger.info(f"inputs: Pch={p_charge_kw} kW, Pdis={p_discharge_kw} kW, capacity={capacity_kwh} kWh, E0={e0_kwh:.1f} kWh "
                 f"(SoC {100 * e0_kwh / capacity_kwh:.1f} %), Eend={e_end_kwh:.1f} kWh, "
                 f"forecast values price/load/pv={len(price)}/{len(load)}/{len(pv)}, start={iso(start)}")
 
@@ -223,10 +273,11 @@ def run(config_path, now=None):
 
     inp = a5model.PlanInputs(
         interval_s=interval_s, load_kw=load_s, pv_kw=pv_s, price_eur_mwh=price_s,
-        p_max_kw=p_max_kw, capacity_kwh=capacity_kwh, e0_kwh=e0_kwh, e_end_kwh=e_end_kwh,
-        soc_min_pct=float(params["ess_min_soc"]), soc_max_pct=float(params["ess_max_soc"]),
-        import_limit_kw=float(params["pccImportLimitW"]) / 1000.0,
-        export_limit_kw=-float(params["pccExportLimitW"]) / 1000.0,
+        p_charge_kw=p_charge_kw, p_discharge_kw=p_discharge_kw,
+        capacity_kwh=capacity_kwh, e0_kwh=e0_kwh, e_end_kwh=e_end_kwh,
+        soc_min_pct=vals["ess_min_soc"], soc_max_pct=vals["ess_max_soc"],
+        import_limit_kw=vals["pccImportLimitW"] / 1000.0,
+        pcc_min_kw=vals["pccExportLimitW"] / 1000.0,
         eta_charge=float(params["essChargeEfficiency"]), eta_discharge=float(params["essDischargeEfficiency"]),
         grid_tariff_eur_kwh=float(params["gridTariffEurPerKWh"]),
         degradation_eur_kwh=float(params["essDegradationCostEurPerKWh"]),
@@ -243,9 +294,9 @@ def run(config_path, now=None):
 
     logger.info(f"solved ({result.status}): {len(times)} steps {iso(times[0])} .. {iso(times[-1])}, "
                 f"cost {result.cost_eur:.2f} EUR (ramp {result.ramp_cost_eur:.4f}), end energy {result.energy_kwh[-1]:.1f} kWh")
-    if result.import_overrun_kwh > 1e-6 or result.export_overrun_kwh > 1e-6:
+    if result.import_overrun_kwh > 1e-6 or result.lower_overrun_kwh > 1e-6:
         logger.warning(f"plan exceeds the PCC limits: import {result.import_overrun_kwh:.2f} kWh, "
-                       f"export {result.export_overrun_kwh:.2f} kWh over the horizon")
+                       f"below the lower limit {result.lower_overrun_kwh:.2f} kWh over the horizon")
     if abs(result.end_deviation_kwh) > 1e-6:
         logger.warning(f"end energy misses its target by {result.end_deviation_kwh:.2f} kWh")
     post_plan(result_dp_id, start, times, [v * 1000.0 for v in result.ess_kw])
