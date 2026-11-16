@@ -250,6 +250,7 @@ def test_asymmetric_power_limits_end_to_end(cfg, monkeypatch):
 def test_positive_lower_pcc_limit_end_to_end(cfg, monkeypatch, caplog):
     # load 10 kW; price makes the plan want to discharge; a 5 kW minimum import caps the discharge at 5 kW
     srv = FakeServer()
+    srv.datapoints["charge"]["lastReadingValue"] = 80000.0    # enough energy to discharge all day
     srv.datapoints["endlow"] = {"lastReadingValue": 15000.0}    # may end at the SoC minimum, so discharging pays
     srv.forecasts["price"] = series(10, lambda i: 300.0)
     srv.install(monkeypatch)

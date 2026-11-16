@@ -203,16 +203,27 @@ def test_equal_power_limits_equal_the_single_limit_model(name):
     assert r.lower_overrun_kwh == pytest.approx(o_exp, abs=1e-6)
 
 
+def asymmetric_inputs(p_charge, p_discharge, e0):
+    """100 kW load, 4 cheap then 8 dear steps, no end target and no ramp term: the plan uses the limits to the full."""
+    return inputs(p_charge_kw=p_charge, p_discharge_kw=p_discharge, load_kw=[100.0] * 12,
+                  pv_kw=[0.0] * 12, price_eur_mwh=[10.0] * 4 + [300.0] * 8, capacity_kwh=1000.0, e0_kwh=e0,
+                  e_end_kwh=0.0, soc_min_pct=0, soc_max_pct=100, import_limit_kw=1000.0,
+                  end_penalty_eur_kwh=0.0, ramp_penalty_eur_kw=0.0)
+
+
 def test_asymmetric_power_limits_are_respected():
-    # 100 kW load, cheap then dear; charge limit 50 kW, discharge limit 30 kW, both binding.
-    kw = dict(load_kw=[100.0] * 8, price_eur_mwh=[10.0] * 4 + [300.0] * 4, capacity_kwh=1000.0, e0_kwh=500.0,
-              e_end_kwh=516.0, soc_min_pct=0, soc_max_pct=100, import_limit_kw=1000.0)
-    r = solve(inputs(p_charge_kw=50.0, p_discharge_kw=30.0, **kw))
+    # charge limit 50 kW, discharge limit 30 kW
+    r = solve(asymmetric_inputs(50.0, 30.0, e0=0.0))        # empty battery: charges in the cheap block, at the limit
     assert max(r.ess_kw) == pytest.approx(50.0, abs=1e-4)
+    assert min(r.ess_kw) >= -30.0 - 1e-6
+    r = solve(asymmetric_inputs(50.0, 30.0, e0=500.0))      # plenty of energy: discharges in the dear block, at the limit
     assert min(r.ess_kw) == pytest.approx(-30.0, abs=1e-4)
-    r = solve(inputs(p_charge_kw=30.0, p_discharge_kw=50.0, **dict(kw, e_end_kwh=500.0)))
-    assert max(r.ess_kw) <= 30.0 + 1e-6 and min(r.ess_kw) >= -50.0 - 1e-6
-    assert min(r.ess_kw) == pytest.approx(-50.0, abs=1e-4)
+    assert max(r.ess_kw) <= 50.0 + 1e-6
+    # and the other way round
+    r = solve(asymmetric_inputs(30.0, 50.0, e0=0.0))
+    assert max(r.ess_kw) == pytest.approx(30.0, abs=1e-4) and min(r.ess_kw) >= -50.0 - 1e-6
+    r = solve(asymmetric_inputs(30.0, 50.0, e0=500.0))
+    assert min(r.ess_kw) == pytest.approx(-50.0, abs=1e-4) and max(r.ess_kw) <= 30.0 + 1e-6
 
 
 def test_asymmetric_limits_with_negative_prices_solve_within_limits():
