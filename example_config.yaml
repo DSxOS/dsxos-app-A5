@@ -12,19 +12,16 @@ params:
   apiEndpoint: "http://localhost:8080/api"  # API endpoint to call
   token: "YOUR_CLIENT_SECRET"               # API credential secret; exchanged for a short-lived token (client_credentials)
   clientId: "api-client-id"                 # API credential client ID (Monitoring > API credentials)
-  ess_max_P_dp_id: "ess_max_P"              # Storage capacity for SOC calculation
   ess_charge_dp_id: "ess_charge"            # total stored energy now, Wh
   essEffectiveEndCharge: "ess_charge"       # optional: target stored energy at the end, Wh (default: start energy)
-  ess_max_E_dp_id: "ess_max_E"              # ESS max charge
-  pccImportLimitW: 55000                    # PCC limit energy import
-  pccExportLimitW: -1000000                 # PCC limit power export
-  ess_min_soc: 15                           # Minimum SOC allowed for peak shaving
-  ess_max_soc: 90                           # Maximum SOC allowed for peak shaving
-  # essMinSafeLim is no longer used (ignored if present)
-  # essMinSafeLim: 
-  #   expression: x
-  #   expressionMap:
-  #     x: ess_min_batt_safe_lim.last_reading    #
+  # Operational params: a number (constant) or a datapoint identifier (latest value read at every run)
+  ess_max_P_charge_dp_id: "ess_max_P_charge"  # ESS charge power limit, W, positive
+  ess_max_P_discharge_dp_id: "ess_max_P_discharge"  # ESS discharge power limit, W, positive (may equal the charge limit)
+  ess_max_E_dp_id: "ess_max_E"              # ESS capacity, Wh
+  pccImportLimitW: "pcc_p_max_p"            # upper limit of the net PCC power, W, import positive (or a number)
+  pccExportLimitW: "pcc_p_min_p"            # lower limit of the net PCC power, W, signed: -1000000 = export allowed, 0 = no export, positive = minimum import
+  ess_min_soc: 15                           # minimum SoC, % (or a datapoint)
+  ess_max_soc: 90                           # maximum SoC, % (or a datapoint)
   productionPrognosisIdentifier: "production_p_lt"    # Production forecast values
   consumptionPrognosisIdentifier: "consumption_p_lt"  # Consumption forecast values
   npPriceIdentifier: "elering_nps_price"              # Elering price forecast

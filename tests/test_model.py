@@ -6,9 +6,11 @@ import model as a5model
 
 def inputs(**over):
     base = dict(interval_s=900, load_kw=[10.0] * 8, pv_kw=[0.0] * 8, price_eur_mwh=[10.0] * 4 + [300.0] * 4,
-                p_max_kw=20.0, capacity_kwh=100.0, e0_kwh=50.0, e_end_kwh=50.0, soc_min_pct=15, soc_max_pct=80,
-                import_limit_kw=1000.0, export_limit_kw=0.0, eta_charge=0.95, eta_discharge=0.95,
+                p_charge_kw=20.0, p_discharge_kw=20.0, capacity_kwh=100.0, e0_kwh=50.0, e_end_kwh=50.0, soc_min_pct=15, soc_max_pct=80,
+                import_limit_kw=1000.0, pcc_min_kw=0.0, eta_charge=0.95, eta_discharge=0.95,
                 grid_tariff_eur_kwh=0.0, degradation_eur_kwh=0.0, pcc_penalty_eur_kwh=10.0, end_penalty_eur_kwh=1.0)
+    if "p_max_kw" in over:   # shorthand: equal charge and discharge limit
+        over["p_charge_kw"] = over["p_discharge_kw"] = over.pop("p_max_kw")
     base.update(over)
     return a5model.PlanInputs(**base)
 
@@ -32,7 +34,7 @@ def test_hand_checked_optimum_charges_cheap_discharges_expensive():
     assert all(p >= -1e-6 for p in r.ess_kw[:4]) and all(p <= 1e-6 for p in r.ess_kw[4:])
     assert all(15.0 - 1e-6 <= e <= 80.0 + 1e-6 for e in r.energy_kwh[1:])
     assert r.energy_kwh[-1] == pytest.approx(50.0, abs=1e-4)
-    assert r.import_overrun_kwh == pytest.approx(0) and r.export_overrun_kwh == pytest.approx(0)
+    assert r.import_overrun_kwh == pytest.approx(0) and r.lower_overrun_kwh == pytest.approx(0)
 
 
 def test_efficiency_losses_over_a_cycle():
@@ -121,3 +123,130 @@ def test_ramp_penalty_has_small_economic_impact():
     on = solve(flicker_inputs(0.0001))
     assert off.ramp_cost_eur == 0
     assert (on.cost_eur - on.ramp_cost_eur) - off.cost_eur <= 0.01
+
+
+# --- OPD R3 separate power limits, R4 signed PCC window (AC1 d, e) --------------------------------------------------
+
+def legacy_single_limit_solve(inp, p_max):
+    """Reference: the pre-OPD model (one p_max for both directions, import/export limits as separate soft bounds,
+    export limit = -pcc_min_kw for pcc_min_kw <= 0). Kept here only to prove that the new model is identical."""
+    import pyomo.environ as pyo
+    n = len(inp.load_kw)
+    dt = inp.interval_s / 3600.0
+    e_min, e_max = a5model.energy_bounds(inp)
+    e_end = min(max(inp.e_end_kwh, e_min), e_max)
+    m = pyo.ConcreteModel()
+    m.T = pyo.RangeSet(0, n - 1)
+    m.K = pyo.RangeSet(0, n)
+    m.ch = pyo.Var(m.T, bounds=(0, p_max))
+    m.dis = pyo.Var(m.T, bounds=(0, p_max))
+    m.zc = pyo.Var(m.T, domain=pyo.Binary)
+    m.ch_on = pyo.Constraint(m.T, rule=lambda m, t: m.ch[t] <= p_max * m.zc[t])
+    m.dis_on = pyo.Constraint(m.T, rule=lambda m, t: m.dis[t] <= p_max * (1 - m.zc[t]))
+    m.imp = pyo.Var(m.T, domain=pyo.NonNegativeReals)
+    m.exp = pyo.Var(m.T, domain=pyo.NonNegativeReals)
+    m.o_imp = pyo.Var(m.T, domain=pyo.NonNegativeReals)
+    m.o_exp = pyo.Var(m.T, domain=pyo.NonNegativeReals)
+    m.balance = pyo.Constraint(m.T, rule=lambda m, t:
+                               m.imp[t] - m.exp[t] == inp.load_kw[t] + inp.pv_kw[t] + m.ch[t] - m.dis[t])
+    m.imp_limit = pyo.Constraint(m.T, rule=lambda m, t: m.imp[t] <= inp.import_limit_kw + m.o_imp[t])
+    m.exp_limit = pyo.Constraint(m.T, rule=lambda m, t: m.exp[t] <= -inp.pcc_min_kw + m.o_exp[t])
+    if any(p < 0 for p in inp.price_eur_mwh):
+        big_m = max(abs(l + v) for l, v in zip(inp.load_kw, inp.pv_kw)) + p_max + 1.0
+        m.zi = pyo.Var(m.T, domain=pyo.Binary)
+        m.imp_on = pyo.Constraint(m.T, rule=lambda m, t: m.imp[t] <= big_m * m.zi[t])
+        m.exp_on = pyo.Constraint(m.T, rule=lambda m, t: m.exp[t] <= big_m * (1 - m.zi[t]))
+    m.E = pyo.Var(m.K)
+    m.E[0].fix(inp.e0_kwh)
+    for k in range(1, n + 1):
+        m.E[k].setlb(e_min)
+        m.E[k].setub(e_max)
+    m.energy = pyo.Constraint(m.T, rule=lambda m, t:
+                              m.E[t + 1] == m.E[t] + (m.ch[t] * inp.eta_charge - m.dis[t] / inp.eta_discharge) * dt)
+    m.dev_up = pyo.Var(domain=pyo.NonNegativeReals)
+    m.dev_down = pyo.Var(domain=pyo.NonNegativeReals)
+    m.end_target = pyo.Constraint(expr=m.E[n] - e_end == m.dev_up - m.dev_down)
+    m.TR = pyo.Set(initialize=list(range(1, n)))
+    m.ramp = pyo.Var(m.TR, domain=pyo.NonNegativeReals)
+    m.ramp_up = pyo.Constraint(m.TR, rule=lambda m, t: m.ramp[t] >= (m.ch[t] - m.dis[t]) - (m.ch[t - 1] - m.dis[t - 1]))
+    m.ramp_down = pyo.Constraint(m.TR, rule=lambda m, t: m.ramp[t] >= (m.ch[t - 1] - m.dis[t - 1]) - (m.ch[t] - m.dis[t]))
+    m.cost = pyo.Objective(sense=pyo.minimize, expr=sum(
+        dt * (m.imp[t] * (inp.price_eur_mwh[t] / 1000.0 + inp.grid_tariff_eur_kwh)
+              - m.exp[t] * inp.price_eur_mwh[t] / 1000.0 + m.ch[t] * inp.degradation_eur_kwh
+              + (m.o_imp[t] + m.o_exp[t]) * inp.pcc_penalty_eur_kwh) for t in m.T)
+        + (m.dev_up + m.dev_down) * inp.end_penalty_eur_kwh + sum(m.ramp[t] for t in m.TR) * inp.ramp_penalty_eur_kw)
+    res = pyo.SolverFactory("glpk").solve(m)
+    assert str(res.solver.termination_condition) == "optimal"
+    return ([pyo.value(m.ch[t]) - pyo.value(m.dis[t]) for t in m.T], pyo.value(m.cost),
+            sum(pyo.value(m.o_imp[t]) for t in m.T) * dt, sum(pyo.value(m.o_exp[t]) for t in m.T) * dt)
+
+
+EQUAL_LIMIT_CASES = {
+    "arbitrage": dict(),
+    "no-export-binding-import": dict(load_kw=[50.0] * 8, import_limit_kw=45.0, price_eur_mwh=[10.0] * 4 + [300.0] * 4),
+    "export-allowed": dict(pcc_min_kw=-30.0, pv_kw=[-40.0] * 8, load_kw=[10.0] * 8),
+    "negative-prices": dict(price_eur_mwh=[-50.0] * 4 + [300.0] * 4, pcc_min_kw=-15.0, pv_kw=[-25.0] * 8),
+    "overrun": dict(load_kw=[50.0] * 4, pv_kw=[0.0] * 4, price_eur_mwh=[100.0] * 4, p_max_kw=5.0, capacity_kwh=10.0,
+                    e0_kwh=5.0, e_end_kwh=5.0, import_limit_kw=10.0),
+}
+
+
+@pytest.mark.parametrize("name", sorted(EQUAL_LIMIT_CASES))
+def test_equal_power_limits_equal_the_single_limit_model(name):
+    inp = inputs(**EQUAL_LIMIT_CASES[name])
+    assert inp.p_charge_kw == inp.p_discharge_kw
+    ess, cost, o_imp, o_exp = legacy_single_limit_solve(inp, inp.p_charge_kw)
+    r = solve(inp)
+    assert r.cost_eur == pytest.approx(cost, abs=1e-6)
+    assert r.ess_kw == pytest.approx(ess, abs=1e-4)
+    assert r.import_overrun_kwh == pytest.approx(o_imp, abs=1e-6)
+    assert r.lower_overrun_kwh == pytest.approx(o_exp, abs=1e-6)
+
+
+def asymmetric_inputs(p_charge, p_discharge, e0):
+    """100 kW load, 4 cheap then 8 dear steps, no end target and no ramp term: the plan uses the limits to the full."""
+    return inputs(p_charge_kw=p_charge, p_discharge_kw=p_discharge, load_kw=[100.0] * 12,
+                  pv_kw=[0.0] * 12, price_eur_mwh=[10.0] * 4 + [300.0] * 8, capacity_kwh=1000.0, e0_kwh=e0,
+                  e_end_kwh=0.0, soc_min_pct=0, soc_max_pct=100, import_limit_kw=1000.0,
+                  end_penalty_eur_kwh=0.0, ramp_penalty_eur_kw=0.0)
+
+
+def test_asymmetric_power_limits_are_respected():
+    # charge limit 50 kW, discharge limit 30 kW
+    r = solve(asymmetric_inputs(50.0, 30.0, e0=0.0))        # empty battery: charges in the cheap block, at the limit
+    assert max(r.ess_kw) == pytest.approx(50.0, abs=1e-4)
+    assert min(r.ess_kw) >= -30.0 - 1e-6
+    r = solve(asymmetric_inputs(50.0, 30.0, e0=500.0))      # plenty of energy: discharges in the dear block, at the limit
+    assert min(r.ess_kw) == pytest.approx(-30.0, abs=1e-4)
+    assert max(r.ess_kw) <= 50.0 + 1e-6
+    # and the other way round
+    r = solve(asymmetric_inputs(30.0, 50.0, e0=0.0))
+    assert max(r.ess_kw) == pytest.approx(30.0, abs=1e-4) and min(r.ess_kw) >= -50.0 - 1e-6
+    r = solve(asymmetric_inputs(30.0, 50.0, e0=500.0))
+    assert min(r.ess_kw) == pytest.approx(-50.0, abs=1e-4) and max(r.ess_kw) <= 30.0 + 1e-6
+
+
+def test_asymmetric_limits_with_negative_prices_solve_within_limits():
+    r = solve(inputs(p_charge_kw=50.0, p_discharge_kw=30.0, price_eur_mwh=[-50.0] * 4 + [300.0] * 4,
+                     load_kw=[20.0] * 8, capacity_kwh=1000.0, soc_min_pct=0, soc_max_pct=100, e0_kwh=500.0,
+                     e_end_kwh=500.0, pcc_min_kw=-100.0))
+    assert max(r.ess_kw) <= 50.0 + 1e-6 and min(r.ess_kw) >= -30.0 - 1e-6
+
+
+def test_positive_lower_pcc_limit_is_respected_when_feasible():
+    # Dear energy: the plan would discharge to cover the whole 10 kW load; a 5 kW minimum import limits it to 5 kW.
+    inp = inputs(price_eur_mwh=[300.0] * 8, e_end_kwh=15.0, pcc_min_kw=5.0)
+    r = solve(inp)
+    net = [l + p for l, p in zip(inp.load_kw, r.ess_kw)]
+    assert all(x >= 5.0 - 1e-6 for x in net)
+    assert min(r.ess_kw) == pytest.approx(-5.0, abs=1e-4)
+    assert r.lower_overrun_kwh == pytest.approx(0, abs=1e-6) and r.import_overrun_kwh == pytest.approx(0, abs=1e-6)
+
+
+def test_positive_lower_pcc_limit_reports_overrun_when_infeasible():
+    # Net power cannot exceed load + charge limit = 30 kW; a 50 kW minimum is missed by 20 kW for 8 x 0.25 h = 40 kWh.
+    inp = inputs(price_eur_mwh=[100.0] * 8, capacity_kwh=1000.0, soc_min_pct=0, soc_max_pct=100, e0_kwh=500.0,
+                 e_end_kwh=500.0, pcc_min_kw=50.0)
+    r = solve(inp)
+    assert r.lower_overrun_kwh == pytest.approx(40.0, abs=1e-4)
+    assert r.import_overrun_kwh == pytest.approx(0, abs=1e-6)

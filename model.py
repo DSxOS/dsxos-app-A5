@@ -2,6 +2,8 @@
 
 Units: power kW, energy kWh, price EUR/MWh (input) -> EUR/kWh, cost EUR. Positive ESS power = charging.
 PCC power = load + pv + ESS (pv negative = generation); import positive, export positive in its own variable.
+OPD (docs/requirements-opd-operational-datapoints.md): separate charge/discharge power limits (R3) and a signed soft
+net PCC window [pcc_min_kw, import_limit_kw] (R4).
 """
 from dataclasses import dataclass, field
 from typing import List, Optional
@@ -16,14 +18,15 @@ class PlanInputs:
     load_kw: List[float]            # consumption forecast per step
     pv_kw: List[float]              # production forecast per step (negative = generation)
     price_eur_mwh: List[float]      # energy price per step
-    p_max_kw: float                 # ESS charge/discharge power limit
+    p_charge_kw: float              # ESS charge power limit (positive magnitude)
+    p_discharge_kw: float           # ESS discharge power limit (positive magnitude)
     capacity_kwh: float             # ESS capacity
     e0_kwh: float                   # stored energy at the start (total)
     e_end_kwh: float                # target stored energy at the end
     soc_min_pct: float
     soc_max_pct: float
-    import_limit_kw: float          # PCC import limit (soft)
-    export_limit_kw: float          # PCC export limit as a positive number (soft)
+    import_limit_kw: float          # upper limit U of the net PCC power, import positive (soft)
+    pcc_min_kw: float               # lower limit L of the net PCC power, signed: <0 export allowed, >0 minimum import (soft)
     eta_charge: float = 0.95
     eta_discharge: float = 0.95
     grid_tariff_eur_kwh: float = 0.05
@@ -40,7 +43,7 @@ class PlanResult:
     ess_kw: List[float] = field(default_factory=list)       # per step, positive = charging
     energy_kwh: List[float] = field(default_factory=list)   # E[0..N]
     import_overrun_kwh: float = 0.0
-    export_overrun_kwh: float = 0.0
+    lower_overrun_kwh: float = 0.0   # energy below the lower PCC limit
     end_deviation_kwh: float = 0.0
     cost_eur: Optional[float] = None
     ramp_cost_eur: float = 0.0
@@ -60,7 +63,7 @@ def build_model(inp: PlanInputs) -> pyo.ConcreteModel:
     dt_h = inp.interval_s / 3600.0
     e_min, e_max = energy_bounds(inp)
     e_end = min(max(inp.e_end_kwh, e_min), e_max)
-    p_max = inp.p_max_kw
+    p_ch, p_dis = inp.p_charge_kw, inp.p_discharge_kw
 
     m = pyo.ConcreteModel(name="A5")
     m.dt_h = dt_h                         # plain attribute: step length in hours, used when reporting
@@ -68,24 +71,25 @@ def build_model(inp: PlanInputs) -> pyo.ConcreteModel:
     m.K = pyo.RangeSet(0, n)              # energy states
 
     # ESS power, mutually exclusive charge/discharge (R2)
-    m.ch = pyo.Var(m.T, bounds=(0, p_max))
-    m.dis = pyo.Var(m.T, bounds=(0, p_max))
+    m.ch = pyo.Var(m.T, bounds=(0, p_ch))
+    m.dis = pyo.Var(m.T, bounds=(0, p_dis))
     m.zc = pyo.Var(m.T, domain=pyo.Binary)
-    m.ch_on = pyo.Constraint(m.T, rule=lambda m, t: m.ch[t] <= p_max * m.zc[t])
-    m.dis_on = pyo.Constraint(m.T, rule=lambda m, t: m.dis[t] <= p_max * (1 - m.zc[t]))
+    m.ch_on = pyo.Constraint(m.T, rule=lambda m, t: m.ch[t] <= p_ch * m.zc[t])
+    m.dis_on = pyo.Constraint(m.T, rule=lambda m, t: m.dis[t] <= p_dis * (1 - m.zc[t]))
 
     # PCC balance with soft limits (R3)
     m.imp = pyo.Var(m.T, domain=pyo.NonNegativeReals)
     m.exp = pyo.Var(m.T, domain=pyo.NonNegativeReals)
     m.o_imp = pyo.Var(m.T, domain=pyo.NonNegativeReals)
-    m.o_exp = pyo.Var(m.T, domain=pyo.NonNegativeReals)
+    m.o_low = pyo.Var(m.T, domain=pyo.NonNegativeReals)
     m.balance = pyo.Constraint(m.T, rule=lambda m, t:
                                m.imp[t] - m.exp[t] == inp.load_kw[t] + inp.pv_kw[t] + m.ch[t] - m.dis[t])
-    m.imp_limit = pyo.Constraint(m.T, rule=lambda m, t: m.imp[t] <= inp.import_limit_kw + m.o_imp[t])
-    m.exp_limit = pyo.Constraint(m.T, rule=lambda m, t: m.exp[t] <= inp.export_limit_kw + m.o_exp[t])
+    # Signed net PCC window (OPD R4): L - o_low <= net <= U + o_imp, net = imp - exp. For L <= 0 this is exp <= -L + o_low.
+    m.imp_limit = pyo.Constraint(m.T, rule=lambda m, t: m.imp[t] - m.exp[t] <= inp.import_limit_kw + m.o_imp[t])
+    m.low_limit = pyo.Constraint(m.T, rule=lambda m, t: m.imp[t] - m.exp[t] >= inp.pcc_min_kw - m.o_low[t])
     if any(p < 0 for p in inp.price_eur_mwh):
         # With a negative price, importing and exporting at once could look profitable: forbid it.
-        big_m = max(abs(l + v) for l, v in zip(inp.load_kw, inp.pv_kw)) + p_max + 1.0
+        big_m = max(abs(l + v) for l, v in zip(inp.load_kw, inp.pv_kw)) + max(p_ch, p_dis) + 1.0
         m.zi = pyo.Var(m.T, domain=pyo.Binary)
         m.imp_on = pyo.Constraint(m.T, rule=lambda m, t: m.imp[t] <= big_m * m.zi[t])
         m.exp_on = pyo.Constraint(m.T, rule=lambda m, t: m.exp[t] <= big_m * (1 - m.zi[t]))
@@ -119,7 +123,7 @@ def build_model(inp: PlanInputs) -> pyo.ConcreteModel:
             dt_h * (m.imp[t] * (inp.price_eur_mwh[t] / 1000.0 + inp.grid_tariff_eur_kwh)
                     - m.exp[t] * inp.price_eur_mwh[t] / 1000.0
                     + m.ch[t] * inp.degradation_eur_kwh
-                    + (m.o_imp[t] + m.o_exp[t]) * inp.pcc_penalty_eur_kwh)
+                    + (m.o_imp[t] + m.o_low[t]) * inp.pcc_penalty_eur_kwh)
             for t in m.T)
         return energy_cost + (m.dev_up + m.dev_down) * inp.end_penalty_eur_kwh + m.ramp_cost
     m.cost = pyo.Objective(rule=cost, sense=pyo.minimize)
@@ -148,7 +152,7 @@ def solve(m: pyo.ConcreteModel, time_limit_s: float = 300, solver_name: str = "g
         ess_kw=[v + 0.0 for v in ess_kw],          # + 0.0: never -0.0
         energy_kwh=energy,
         import_overrun_kwh=sum(pyo.value(m.o_imp[t]) for t in m.T) * m.dt_h,
-        export_overrun_kwh=sum(pyo.value(m.o_exp[t]) for t in m.T) * m.dt_h,
+        lower_overrun_kwh=sum(pyo.value(m.o_low[t]) for t in m.T) * m.dt_h,
         end_deviation_kwh=pyo.value(m.dev_up) - pyo.value(m.dev_down),
         cost_eur=pyo.value(m.cost),
         ramp_cost_eur=pyo.value(m.ramp_cost),
