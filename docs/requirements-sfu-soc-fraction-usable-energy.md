@@ -100,4 +100,54 @@ None yet.
 
 ## 7. Amendments
 
-None.
+- **SFU-A1 (owner, 2026-11-17): capacity is the usable capacity, the SoC limits are removed. Replaces D1, D2, R1–R3,
+  R6 and AC1(a)–(c).**
+  - **Fact.** On NRG the owner changed `B1_PIXII_713_WHRtg` (`ess_max_E_dp_id`) to the usable capacity, while
+    `B1_PIXII_713_WHAvail` (the energy inputs) is the usable energy in the same basis:
+    - `WHRtg = gross × (max − min)`, live 350 × (0.80 − 0.15) = 227.5 kWh;
+    - `WHAvail = gross × (max − min) × clamp((SoC − min)/(max − min), 0, 1)`, which lies in `[0, WHRtg]`.
+
+    0 is the minimum operating limit and `WHRtg` is the maximum, so the SoC limits are already embedded in both inputs.
+    The integrator verified this on 2026-11-17.
+  - **D3 (replaces D1 and D2).**
+    - `ess_max_E_dp_id` is the **usable** capacity.
+    - The energy inputs are usable energy in `[0, capacity]`, used directly as the model's energy.
+    - `ess_min_soc` and `ess_max_soc` are removed.
+  - **R1' (replaces R1).** `ess_min_soc` and `ess_max_soc` are no longer parameters.
+    - They move into the app's existing `REMOVED` map with the reason "removed (SFU-A1): the SoC limits are embedded
+      in ess_max_E_dp_id (usable capacity) and the energy inputs (usable energy); delete it". A config that still has
+      them fails with the app's existing stale-parameter configuration error.
+    - They are removed from the OPD operational lists, the unit maps, the validation and the resolution.
+  - **R2' (replaces R2).** The model bounds are `e_min = 0` and `e_max = capacity` (kWh). The model's SoC fields and
+    any `%`/fraction wording are removed.
+  - **R3' (replaces R3).**
+    - Each energy input `u` (kWh) goes to the model as `clamp(u, 0, capacity)`, with a WARNING (raw and clamped values)
+      when it clamps. There is no usable→total conversion.
+    - Where an end target defaults to the start energy, the default is the clamped start energy.
+  - **R4' (replaces R4).** The resolved-inputs INFO line shows:
+    - capacity (kWh, usable);
+    - start energy (kWh), raw and used if clamped;
+    - for A4 and A5, the end target;
+    - charge and discharge limits (kW);
+    - PCC limits (kW).
+
+    It shows no SoC values.
+  - **R6' (replaces R6).** README, `example_config.yaml` and the parameter table describe `ess_max_E_dp_id` as the
+    usable capacity and the energy inputs as usable energy in `[0, capacity]`. `ess_min_soc` and `ess_max_soc` are
+    removed and listed as removed.
+  - **AC1' (replaces AC1(a)–(c); AC1(d) is adapted).**
+    - (a) A config with `ess_min_soc` or `ess_max_soc` fails with the stale-parameter error naming it, and nothing is
+      posted. A config without them passes validation.
+    - (b) With capacity 227.5 kWh, the model bounds are 0 and 227.5.
+    - (c) A start energy of 34.3 is used as 34.3. −5 clamps to 0 and 300 clamps to 227.5, each with a WARNING. For A4
+      and A5 the end target behaves the same way, and with no end target it equals the clamped start.
+    - (d) A full solve with these inputs keeps every `E[k]` within [0, 227.5].
+    - Existing tests pass, changed only where they used the SoC parameters or the conversion.
+  - **AC2' (replaces AC2).** In each app's next run log on NRG:
+    - the R4' line shows capacity = `B1_PIXII_713_WHRtg`/1000 and start energy = `B1_PIXII_713_WHAvail`/1000;
+    - the solve is ok/optimal and a plan is posted.
+
+    The values are compared with a captured SQL read.
+  - **Site (NRG, outside the apps).**
+    - The app YAMLs drop `ess_min_soc` and `ess_max_soc`. That deploy must ship together with the new app pins.
+    - `control.yml` `essChargeMaxWs` becomes `WHRtg × 3600`. Without that change the window would be applied twice.

@@ -12,16 +12,14 @@ params:
   apiEndpoint: "http://localhost:8080/api"  # API endpoint to call
   token: "YOUR_CLIENT_SECRET"               # API credential secret; exchanged for a short-lived token (client_credentials)
   clientId: "api-client-id"                 # API credential client ID (Monitoring > API credentials)
-  ess_charge_dp_id: "ess_charge"            # usable energy now above ess_min_soc, Wh (0 .. capacity*(max-min))
-  essEffectiveEndCharge: "ess_charge"       # optional: target usable energy at the end, Wh (default: start energy)
+  ess_charge_dp_id: "ess_charge"            # usable energy now, Wh, in [0, capacity]
+  essEffectiveEndCharge: "ess_charge"       # optional: target usable energy at the end, Wh, in [0, capacity] (default: start energy)
   # Operational params: a number (constant) or a datapoint identifier (latest value read at every run)
   ess_max_P_charge_dp_id: "ess_max_P_charge"  # ESS charge power limit, W, positive
   ess_max_P_discharge_dp_id: "ess_max_P_discharge"  # ESS discharge power limit, W, positive (may equal the charge limit)
-  ess_max_E_dp_id: "ess_max_E"              # gross ESS capacity, Wh
+  ess_max_E_dp_id: "ess_max_E"              # usable ESS capacity, Wh
   pccImportLimitW: "pcc_p_max_p"            # upper limit of the net PCC power, W, import positive (or a number)
   pccExportLimitW: "pcc_p_min_p"            # lower limit of the net PCC power, W, signed: -1000000 = export allowed, 0 = no export, positive = minimum import
-  ess_min_soc: 0.15                         # minimum SoC, fraction 0..1 (or a datapoint)
-  ess_max_soc: 0.90                         # maximum SoC, fraction 0..1 (or a datapoint)
   productionPrognosisIdentifier: "production_p_lt"    # Production forecast values
   consumptionPrognosisIdentifier: "consumption_p_lt"  # Consumption forecast values
   npPriceIdentifier: "elering_nps_price"              # Elering price forecast

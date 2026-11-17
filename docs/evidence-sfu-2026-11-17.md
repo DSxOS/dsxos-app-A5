@@ -32,3 +32,22 @@ SQL read of `datapoint.last_reading_value` at 19:00:35–38Z:
 - `B1_PIXII_713_WHRtg` = 350000, so the capacity is 350 kWh, as logged.
 - `B1_PIXII_713_WHAvail` = 0, so usable energy is 0 kWh, as logged. `bess_SOC` = 0.143 is below the 0.15 limit.
 - Total = 350 × 0.15 + 0 = 52.5 kWh, as logged.
+
+## SFU-A1 (usable capacity, SoC limits removed)
+
+Branch `fix/sfu-a1` at `b51e152`. Validated by an independent validator agent.
+
+| AC | Verdict | Evidence |
+|---|---|---|
+| AC1'(a)-(d) | PASS | The validator reviewed `git diff main..fix/sfu-a1`. `ess_min_soc` and `ess_max_soc` are in REMOVED (stale-parameter error) and gone from operational, validation, units and resolution. Bounds are [0, capacity]. Every energy input is clamped to [0, capacity] with a WARNING, and the default end target is the clamped start. No conversion or `/100` is left. The R4' line has no SoC values. The objective, ramp and loss terms are untouched, and every changed existing test keeps its intent. |
+| AC2' | NOT RUN | Needs the NRG deploy. |
+
+pytest on host `dsxos` (NRG VM), from `git archive fix/sfu-a1` in a mktemp dir, run with `sudo docker run --rm -v $PWD:/w -w /w --entrypoint sh python-app-a5 -c 'pip install -q pytest==8.3.5 >/dev/null 2>&1; python -m pytest -q …'`:
+
+```
+85 passed in 3.03s
+```
+
+The worker's own run gave the same count with `EXIT=0` from pytest.
+
+Cosmetic leftovers, not blocking: stale "SoC" wording in a comment or docstring, and one continuation-line indent.

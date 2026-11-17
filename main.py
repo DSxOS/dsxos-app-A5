@@ -39,7 +39,7 @@ REQUIRED = [
     "apiEndpoint", "clientId", "token",
     "npPriceIdentifier", "consumptionPrognosisIdentifier", "productionPrognosisIdentifier",
     "ess_max_P_charge_dp_id", "ess_max_P_discharge_dp_id", "ess_charge_dp_id", "ess_max_E_dp_id",
-    "pccImportLimitW", "pccExportLimitW", "ess_min_soc", "ess_max_soc",
+    "pccImportLimitW", "pccExportLimitW",
     "essResultPowerPlanIdentifier", "essCurrentPowerPlanIdentifier", "interval", "min_period",
 ]
 # Removed or replaced params (OPD R5): present in the config = configuration error naming the replacement.
@@ -47,10 +47,14 @@ REMOVED = {
     "essMinSafeLim": "removed (not used by the model); delete it",
     "ess_max_P_dp_id": "replaced by ess_max_P_charge_dp_id and ess_max_P_discharge_dp_id",
     "essPowerLimitW": "replaced by ess_max_P_charge_dp_id and ess_max_P_discharge_dp_id",
+    "ess_min_soc": "removed (SFU-A1): the SoC limits are embedded in ess_max_E_dp_id (usable capacity) "
+                   "and the energy inputs (usable energy); delete it",
+    "ess_max_soc": "removed (SFU-A1): the SoC limits are embedded in ess_max_E_dp_id (usable capacity) "
+                   "and the energy inputs (usable energy); delete it",
 }
 # OPD operational params: a number (constant) or a non-empty string (datapoint identifier, latest value per run).
 OPERATIONAL = [
-    "pccImportLimitW", "pccExportLimitW", "ess_min_soc", "ess_max_soc",
+    "pccImportLimitW", "pccExportLimitW",
     "ess_max_P_charge_dp_id", "ess_max_P_discharge_dp_id", "ess_max_E_dp_id",
 ]
 
@@ -129,34 +133,22 @@ def value_or_datapoint(params, name):
     return float(v), "const"
 
 
-def soc_hint(vals):
-    """Message of the SoC rule (SFU R1): the limits are fractions; values > 1 are named as probable percent."""
-    msg = "need 0 <= ess_min_soc < ess_max_soc <= 1 (fractions, not percent)"
-    for n in ("ess_min_soc", "ess_max_soc"):
-        if vals[n] > 1:
-            msg += f"; {n}={vals[n]:g} looks like percent; use {vals[n] / 100:g}"
-    return msg
-
-
-def usable_to_total(usable_kwh, capacity_kwh, soc_min, soc_max, name):
-    """SFU R3: usable energy above the minimum SoC -> total stored energy, clamped to the SoC window (WARNING if clamped)."""
-    span = capacity_kwh * (soc_max - soc_min)
-    clamped = min(max(usable_kwh, 0.0), span)
-    if clamped != usable_kwh:
-        logger.warning(f"{name}: usable energy {usable_kwh:.3f} kWh is outside 0..{span:.3f} kWh; "
+def clamp_energy(u_kwh, capacity_kwh, name):
+    """SFU-A1 R3': an energy input (usable energy, kWh) is used as clamp(u, 0, capacity); WARNING if it clamps."""
+    clamped = min(max(u_kwh, 0.0), capacity_kwh)
+    if clamped != u_kwh:
+        logger.warning(f"{name}: energy {u_kwh:.3f} kWh is outside 0..{capacity_kwh:.3f} kWh; "
                        f"clamped to {clamped:.3f} kWh")
-    return capacity_kwh * soc_min + clamped
+    return clamped
 
 
 def validate_operational(vals, srcs):
-    """OPD R2 on the resolved values (W, Wh, SoC fractions). A violation is an input error if a datapoint is involved in it,
+    """OPD R2 on the resolved values (W, Wh). A violation is an input error if a datapoint is involved in it,
     otherwise a configuration error."""
     rules = [
         (["ess_max_P_charge_dp_id"], vals["ess_max_P_charge_dp_id"] > 0, "ess_max_P_charge_dp_id must be > 0"),
         (["ess_max_P_discharge_dp_id"], vals["ess_max_P_discharge_dp_id"] > 0, "ess_max_P_discharge_dp_id must be > 0"),
         (["ess_max_E_dp_id"], vals["ess_max_E_dp_id"] > 0, "ess_max_E_dp_id must be > 0"),
-        (["ess_min_soc", "ess_max_soc"], 0 <= vals["ess_min_soc"] < vals["ess_max_soc"] <= 1,
-         soc_hint(vals)),
         (["pccExportLimitW", "pccImportLimitW"], vals["pccExportLimitW"] <= vals["pccImportLimitW"],
          "need pccExportLimitW <= pccImportLimitW"),
     ]
@@ -262,14 +254,13 @@ def run(config_path, now=None):
         p_charge_kw = vals["ess_max_P_charge_dp_id"] / 1000.0
         p_discharge_kw = vals["ess_max_P_discharge_dp_id"] / 1000.0
         capacity_kwh = vals["ess_max_E_dp_id"] / 1000.0
-        smin, smax = vals["ess_min_soc"], vals["ess_max_soc"]
         u0_kwh = read_value(params["ess_charge_dp_id"], "ess_charge_dp_id",
                             now=now, max_age_s=float(params["maxInputAgeS"])) / 1000.0
-        e0_kwh = usable_to_total(u0_kwh, capacity_kwh, smin, smax, "ess_charge_dp_id")
+        e0_kwh = clamp_energy(u0_kwh, capacity_kwh, "ess_charge_dp_id")
         end_id = params.get("essEffectiveEndCharge")
         if end_id:
             u_end_kwh = read_value(end_id, "essEffectiveEndCharge") / 1000.0
-            e_end_kwh = usable_to_total(u_end_kwh, capacity_kwh, smin, smax, "essEffectiveEndCharge")
+            e_end_kwh = clamp_energy(u_end_kwh, capacity_kwh, "essEffectiveEndCharge")
         else:
             u_end_kwh, e_end_kwh = u0_kwh, e0_kwh
         price_dp = query_utils.get_datapoint(params["npPriceIdentifier"])
@@ -287,9 +278,10 @@ def run(config_path, now=None):
     if price_initial is None and price:
         price_initial = sorted(price, key=lambda r: Util.parse_time(r["time"]))[0]["value"]
     logger.info("inputs: " + ", ".join(f"{n}={vals[n]:g} ({srcs[n]})" for n in OPERATIONAL))
-    logger.info(f"inputs: ess_min_soc={smin:g}, ess_max_soc={smax:g}, capacity={capacity_kwh:g} kWh, "
-                f"usable start={u0_kwh:.3f} kWh -> total start={e0_kwh:.3f} kWh, "
-                f"usable end={u_end_kwh:.3f} kWh -> total end={e_end_kwh:.3f} kWh, "
+    start_txt = f"{e0_kwh:.3f}" if e0_kwh == u0_kwh else f"{u0_kwh:.3f} (raw) -> {e0_kwh:.3f} (used)"
+    end_txt = f"{e_end_kwh:.3f}" if e_end_kwh == u_end_kwh else f"{u_end_kwh:.3f} (raw) -> {e_end_kwh:.3f} (used)"
+    logger.info(f"inputs: capacity={capacity_kwh:g} kWh (usable), start energy={start_txt} kWh, "
+                f"end target={end_txt} kWh, "
                 f"Pch={p_charge_kw:g} kW, Pdis={p_discharge_kw:g} kW, "
                 f"PCC {vals['pccExportLimitW'] / 1000.0:g} .. {vals['pccImportLimitW'] / 1000.0:g} kW, "
                 f"forecast values price/load/pv={len(price)}/{len(load)}/{len(pv)}, start={iso(start)}")
@@ -303,7 +295,6 @@ def run(config_path, now=None):
         interval_s=interval_s, load_kw=load_s, pv_kw=pv_s, price_eur_mwh=price_s,
         p_charge_kw=p_charge_kw, p_discharge_kw=p_discharge_kw,
         capacity_kwh=capacity_kwh, e0_kwh=e0_kwh, e_end_kwh=e_end_kwh,
-        soc_min=vals["ess_min_soc"], soc_max=vals["ess_max_soc"],
         import_limit_kw=vals["pccImportLimitW"] / 1000.0,
         pcc_min_kw=vals["pccExportLimitW"] / 1000.0,
         eta_charge=float(params["essChargeEfficiency"]), eta_discharge=float(params["essDischargeEfficiency"]),

@@ -6,7 +6,7 @@ import model as a5model
 
 def inputs(**over):
     base = dict(interval_s=900, load_kw=[10.0] * 8, pv_kw=[0.0] * 8, price_eur_mwh=[10.0] * 4 + [300.0] * 4,
-                p_charge_kw=20.0, p_discharge_kw=20.0, capacity_kwh=100.0, e0_kwh=50.0, e_end_kwh=50.0, soc_min=0.15, soc_max=0.80,
+                p_charge_kw=20.0, p_discharge_kw=20.0, capacity_kwh=100.0, e0_kwh=50.0, e_end_kwh=50.0,
                 import_limit_kw=1000.0, pcc_min_kw=0.0, eta_charge=0.95, eta_discharge=0.95,
                 grid_tariff_eur_kwh=0.0, degradation_eur_kwh=0.0, pcc_penalty_eur_kwh=10.0, end_penalty_eur_kwh=1.0)
     if "p_max_kw" in over:   # shorthand: equal charge and discharge limit
@@ -44,18 +44,18 @@ def test_efficiency_losses_over_a_cycle():
     assert discharged / charged == pytest.approx(0.95 * 0.95, rel=1e-6)
 
 
-def test_soc_window_is_enforced():
-    # Very cheap then very expensive with a big battery: the plan wants to use the full window, not beyond it.
+def test_energy_bounds_are_zero_and_capacity():
+    # Very cheap then very expensive with a big battery: the plan uses the full [0, capacity] range, not beyond it.
     inp = inputs(price_eur_mwh=[1.0] * 4 + [900.0] * 4, load_kw=[100.0] * 8, p_max_kw=200.0,
                  import_limit_kw=10000.0, e0_kwh=50.0, e_end_kwh=50.0)
     r = solve(inp)
-    assert min(r.energy_kwh[1:]) >= 15.0 - 1e-6 and max(r.energy_kwh[1:]) <= 80.0 + 1e-6
-    assert max(r.energy_kwh) == pytest.approx(80.0, abs=1e-3)  # charges up to the window's top
+    assert min(r.energy_kwh) >= -1e-6 and max(r.energy_kwh) <= 100.0 + 1e-6
+    assert max(r.energy_kwh) == pytest.approx(100.0, abs=1e-3)  # charges up to the capacity
 
 
-def test_start_outside_window_is_still_solvable():
-    r = solve(inputs(e0_kwh=10.0, e_end_kwh=10.0))  # below Emin = 15
-    assert min(r.energy_kwh) >= 10.0 - 1e-6
+def test_start_at_zero_is_solvable():
+    r = solve(inputs(e0_kwh=0.0, e_end_kwh=0.0))  # at Emin = 0
+    assert min(r.energy_kwh) >= -1e-6
 
 
 def test_soft_pcc_limit_reports_overrun_instead_of_failing():
@@ -207,7 +207,7 @@ def asymmetric_inputs(p_charge, p_discharge, e0):
     """100 kW load, 4 cheap then 8 dear steps, no end target and no ramp term: the plan uses the limits to the full."""
     return inputs(p_charge_kw=p_charge, p_discharge_kw=p_discharge, load_kw=[100.0] * 12,
                   pv_kw=[0.0] * 12, price_eur_mwh=[10.0] * 4 + [300.0] * 8, capacity_kwh=1000.0, e0_kwh=e0,
-                  e_end_kwh=0.0, soc_min=0, soc_max=1, import_limit_kw=1000.0,
+                  e_end_kwh=0.0, import_limit_kw=1000.0,
                   end_penalty_eur_kwh=0.0, ramp_penalty_eur_kw=0.0)
 
 
@@ -228,7 +228,7 @@ def test_asymmetric_power_limits_are_respected():
 
 def test_asymmetric_limits_with_negative_prices_solve_within_limits():
     r = solve(inputs(p_charge_kw=50.0, p_discharge_kw=30.0, price_eur_mwh=[-50.0] * 4 + [300.0] * 4,
-                     load_kw=[20.0] * 8, capacity_kwh=1000.0, soc_min=0, soc_max=1, e0_kwh=500.0,
+                     load_kw=[20.0] * 8, capacity_kwh=1000.0, e0_kwh=500.0,
                      e_end_kwh=500.0, pcc_min_kw=-100.0))
     assert max(r.ess_kw) <= 50.0 + 1e-6 and min(r.ess_kw) >= -30.0 - 1e-6
 
@@ -245,7 +245,7 @@ def test_positive_lower_pcc_limit_is_respected_when_feasible():
 
 def test_positive_lower_pcc_limit_reports_overrun_when_infeasible():
     # Net power cannot exceed load + charge limit = 30 kW; a 50 kW minimum is missed by 20 kW for 8 x 0.25 h = 40 kWh.
-    inp = inputs(price_eur_mwh=[100.0] * 8, capacity_kwh=1000.0, soc_min=0, soc_max=1, e0_kwh=500.0,
+    inp = inputs(price_eur_mwh=[100.0] * 8, capacity_kwh=1000.0, e0_kwh=500.0,
                  e_end_kwh=500.0, pcc_min_kw=50.0)
     r = solve(inp)
     assert r.lower_overrun_kwh == pytest.approx(40.0, abs=1e-4)
