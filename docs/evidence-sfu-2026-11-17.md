@@ -40,7 +40,7 @@ Branch `fix/sfu-a1` at `b51e152`. Validated by an independent validator agent.
 | AC | Verdict | Evidence |
 |---|---|---|
 | AC1'(a)-(d) | PASS | The validator reviewed `git diff main..fix/sfu-a1`. `ess_min_soc` and `ess_max_soc` are in REMOVED (stale-parameter error) and gone from operational, validation, units and resolution. Bounds are [0, capacity]. Every energy input is clamped to [0, capacity] with a WARNING, and the default end target is the clamped start. No conversion or `/100` is left. The R4' line has no SoC values. The objective, ramp and loss terms are untouched, and every changed existing test keeps its intent. |
-| AC2' | NOT RUN | Needs the NRG deploy. |
+| AC2' | PASS | See "AC2' live" below. |
 
 pytest on host `dsxos` (NRG VM), from `git archive fix/sfu-a1` in a mktemp dir, run with `sudo docker run --rm -v $PWD:/w -w /w --entrypoint sh python-app-a5 -c 'pip install -q pytest==8.3.5 >/dev/null 2>&1; python -m pytest -q …'`:
 
@@ -51,3 +51,17 @@ pytest on host `dsxos` (NRG VM), from `git archive fix/sfu-a1` in a mktemp dir, 
 The worker's own run gave the same count with `EXIT=0` from pytest.
 
 Cosmetic leftovers, not blocking: stale "SoC" wording in a comment or docstring, and one continuation-line indent.
+
+### AC2' live (NRG `3a0b78a`, deploy job Succeeded 19:44:43Z)
+
+First quarter-hour run after the deploy, 2026-11-17 20:00:10Z, on host `dsxos`:
+- The log line shows capacity=227.5 kWh (usable), start energy=59.850 kWh, end target=59.850 kWh, with no SoC values.
+- Result: solved (ok/optimal): 1606 steps, cost 421.09 EUR; plan posted to B1_PIXII_704_WSet.
+
+SQL read at 20:01:20Z:
+- `B1_PIXII_713_WHRtg` = 227500, so the capacity is 227.5 kWh.
+- `B1_PIXII_713_WHAvail` = 59850, so the start energy is 59.85 kWh.
+
+Both equal the logged values.
+
+Note: the device register `ess_1_max_E` switches between 350000 and 438000 Wh (87.5 kWh per PIXII unit, 4 or 5 units). `WHRtg` therefore switches between 227.5 and 284.7 kWh. The 19:45 run used 284.7 kWh, which equalled `WHRtg` at that time.
