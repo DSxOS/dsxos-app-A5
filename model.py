@@ -23,8 +23,8 @@ class PlanInputs:
     capacity_kwh: float             # ESS capacity
     e0_kwh: float                   # stored energy at the start (total)
     e_end_kwh: float                # target stored energy at the end
-    soc_min_pct: float
-    soc_max_pct: float
+    soc_min: float                  # minimum SoC, fraction 0..1
+    soc_max: float                  # maximum SoC, fraction 0..1
     import_limit_kw: float          # upper limit U of the net PCC power, import positive (soft)
     pcc_min_kw: float               # lower limit L of the net PCC power, signed: <0 export allowed, >0 minimum import (soft)
     eta_charge: float = 0.95
@@ -51,8 +51,8 @@ class PlanResult:
 
 def energy_bounds(inp: PlanInputs):
     """[Emin, Emax] from the SoC window, widened to include E[0] if it is already outside (R1)."""
-    e_min = inp.capacity_kwh * inp.soc_min_pct / 100.0
-    e_max = inp.capacity_kwh * inp.soc_max_pct / 100.0
+    e_min = inp.capacity_kwh * inp.soc_min
+    e_max = inp.capacity_kwh * inp.soc_max
     return min(e_min, inp.e0_kwh), max(e_max, inp.e0_kwh)
 
 

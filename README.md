@@ -30,7 +30,7 @@ The original algorithm description: [Economic_Optimisation_Description.pdf](http
 Per time step k (length `interval`):
 
 - **ESS:** charge `ch` in [0, Pch] and discharge `dis` in [0, Pdis] (the two limits are separate), never both. The stored energy is
-  `E[k+1] = E[k] + (ch·η_ch − dis/η_dis)·Δt` and must stay within [`ess_min_soc`, `ess_max_soc`] % of the capacity.
+  `E[k+1] = E[k] + (ch·η_ch − dis/η_dis)·Δt` and must stay within [`ess_min_soc`, `ess_max_soc`] × the gross capacity (SoC limits are fractions, 0..1, e.g. 0.15 and 0.90). The energy inputs are usable energy above `ess_min_soc`; A5 converts them to total energy `capacity·min + clamp(u, 0, capacity·(max−min))` (a WARNING is logged if clamped).
   If the start is already outside, the window is widened to the start value.
 - **PCC:** net = import − export = load + pv + ch − dis, with pv negative for generation. The net power should stay in the
   signed window [`pccExportLimitW`, `pccImportLimitW`] (negative = export allowed, 0 = no export, positive = minimum
@@ -55,14 +55,14 @@ shorter than `min_period`, or the solver gives no usable result, A5 re-posts the
 | `npPriceIdentifier` | EUR/MWh | required | Price datapoint (forecast; its last value is used before the first forecast point) |
 | `consumptionPrognosisIdentifier` | W | required | Load forecast (gross load, if PV is given separately) |
 | `productionPrognosisIdentifier` | W | required | PV forecast, negative = generation |
-| `ess_charge_dp_id` | Wh | required | Total stored energy now (last value; at most `maxInputAgeS` old) |
+| `ess_charge_dp_id` | Wh | required | Usable energy now above the minimum SoC, 0 .. capacity·(max−min) (last value; at most `maxInputAgeS` old) |
 | `ess_max_P_charge_dp_id` | W | required | ESS charge power limit, positive magnitude (number or datapoint) |
 | `ess_max_P_discharge_dp_id` | W | required | ESS discharge power limit, positive magnitude (number or datapoint; may be the same as the charge limit) |
-| `ess_max_E_dp_id` | Wh | required | ESS capacity (number or datapoint) |
-| `ess_min_soc`, `ess_max_soc` | % | required | Allowed SoC window (number or datapoint) |
+| `ess_max_E_dp_id` | Wh | required | Gross ESS capacity (number or datapoint) |
+| `ess_min_soc`, `ess_max_soc` | fraction 0..1 | required | Allowed SoC window, e.g. 0.15 and 0.90; percent is rejected (number or datapoint) |
 | `pccImportLimitW` | W | required | Upper limit of the net PCC power, import positive (number or datapoint; soft) |
 | `pccExportLimitW` | W | required | Lower limit of the net PCC power, signed: negative = export allowed, 0 = no export, positive = minimum import (number or datapoint; soft) |
-| `essEffectiveEndCharge` | Wh | start energy | Optional datapoint for the target energy at the end |
+| `essEffectiveEndCharge` | Wh | start energy | Optional datapoint for the target usable energy at the end (above the minimum SoC) |
 | `essResultPowerPlanIdentifier` | W | required | Datapoint that receives the plan |
 | `essCurrentPowerPlanIdentifier` | W | required | Datapoint whose latest plan is the fallback |
 | `interval` | s | required | Plan time step |
@@ -86,7 +86,7 @@ The seven operational parameters `pccImportLimitW`, `pccExportLimitW`, `ess_min_
 `ess_max_P_charge_dp_id`, `ess_max_P_discharge_dp_id` and `ess_max_E_dp_id` take a number (constant) or a datapoint
 identifier (a non-empty string; its latest value is read on every run, with no staleness check). A missing datapoint
 or one without a value is an input error: exit 1, nothing posted, the message names the param and the datapoint.
-After resolving, A5 checks: the power limits and the capacity are > 0, `0 <= ess_min_soc < ess_max_soc <= 100` and
+After resolving, A5 checks: the power limits and the capacity are > 0, `0 <= ess_min_soc < ess_max_soc <= 1` (fractions; a value like 15 is rejected with a hint to use 0.15) and
 `pccExportLimitW <= pccImportLimitW`. A violation is an input error for a datapoint and a configuration error for a
 number (exit 1). The resolved values and their sources (`dp <id>` or `const`) are logged in the `inputs` line.
 Removed parameters (an old ESS power limit, an old safe-limit param) in the config are configuration errors that name

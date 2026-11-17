@@ -27,7 +27,7 @@ class FakeServer:
             "ess_p_a5_test": {"id": 530},
             "pmax": {"lastReadingValue": 20000.0},
             "cap": {"lastReadingValue": 100000.0},
-            "charge": {"lastReadingValue": 50000.0, "lastReadingTime": iso(NOW - timedelta(seconds=30))},
+            "charge": {"lastReadingValue": 35000.0, "lastReadingTime": iso(NOW - timedelta(seconds=30))},
             "price": {"lastReadingValue": 80.0},
         }
         self.forecasts = {
@@ -57,7 +57,7 @@ def cfg(tmp_path, monkeypatch):
         "ess_max_P_charge_dp_id": "pmax", "ess_max_P_discharge_dp_id": "pmax",
         "ess_max_E_dp_id": "cap", "ess_charge_dp_id": "charge",
         "essEffectiveEndCharge": "charge",
-        "ess_min_soc": 15, "ess_max_soc": 80, "pccImportLimitW": 170000, "pccExportLimitW": 0,
+        "ess_min_soc": 0.15, "ess_max_soc": 0.80, "pccImportLimitW": 170000, "pccExportLimitW": 0,
         "essResultPowerPlanIdentifier": "ess_p_a5_test", "essCurrentPowerPlanIdentifier": "ess_p_a5_test",
         "interval": 900, "min_period": 21600, "solverTimeLimitS": 60,
     }
@@ -133,7 +133,7 @@ def test_no_fallback_available_exits_1(cfg, monkeypatch, caplog):
 
 # --- OPD (docs/requirements-opd-operational-datapoints.md) AC1 a, b, c, f ---------------------------------------------
 
-BASE = {"pccImportLimitW": 170000, "pccExportLimitW": 0, "ess_min_soc": 15, "ess_max_soc": 80,
+BASE = {"pccImportLimitW": 170000, "pccExportLimitW": 0, "ess_min_soc": 0.15, "ess_max_soc": 0.80,
         "ess_max_P_charge_dp_id": 20000, "ess_max_P_discharge_dp_id": 20000, "ess_max_E_dp_id": 100000}
 
 
@@ -176,9 +176,9 @@ R2_CASES = [
     ({"ess_max_P_charge_dp_id": 0}, "ess_max_P_charge_dp_id"),
     ({"ess_max_P_discharge_dp_id": -5}, "ess_max_P_discharge_dp_id"),
     ({"ess_max_E_dp_id": 0}, "ess_max_E_dp_id"),
-    ({"ess_min_soc": 80, "ess_max_soc": 80}, "ess_min_soc < ess_max_soc"),
-    ({"ess_min_soc": -1}, "ess_min_soc < ess_max_soc"),
-    ({"ess_max_soc": 101}, "ess_min_soc < ess_max_soc"),
+    ({"ess_min_soc": 0.8, "ess_max_soc": 0.8}, "ess_min_soc < ess_max_soc"),
+    ({"ess_min_soc": -0.1}, "ess_min_soc < ess_max_soc"),
+    ({"ess_max_soc": 1.01}, "ess_min_soc < ess_max_soc"),
     ({"pccExportLimitW": 200000}, "pccExportLimitW <= pccImportLimitW"),
 ]
 
@@ -242,7 +242,7 @@ def test_asymmetric_power_limits_end_to_end(cfg, monkeypatch):
     srv.datapoints["pdis"] = {"lastReadingValue": 30000.0}
     srv.install(monkeypatch)
     assert main.run(cfg(ess_max_P_charge_dp_id="pch", ess_max_P_discharge_dp_id="pdis", ess_max_E_dp_id=1000000,
-                        ess_min_soc=0, ess_max_soc=100), now=NOW) == 0
+                        ess_min_soc=0, ess_max_soc=1), now=NOW) == 0
     values = [r["value"] for r in srv.posted[0][2]]
     assert max(values) <= 50000.0 + 1e-6 and min(values) >= -30000.0 - 1e-6
 
@@ -250,8 +250,8 @@ def test_asymmetric_power_limits_end_to_end(cfg, monkeypatch):
 def test_positive_lower_pcc_limit_end_to_end(cfg, monkeypatch, caplog):
     # load 10 kW; price makes the plan want to discharge; a 5 kW minimum import caps the discharge at 5 kW
     srv = FakeServer()
-    srv.datapoints["charge"]["lastReadingValue"] = 80000.0    # enough energy to discharge all day
-    srv.datapoints["endlow"] = {"lastReadingValue": 15000.0}    # may end at the SoC minimum, so discharging pays
+    srv.datapoints["charge"]["lastReadingValue"] = 65000.0    # enough energy to discharge all day
+    srv.datapoints["endlow"] = {"lastReadingValue": 0.0}    # may end at the SoC minimum, so discharging pays
     srv.forecasts["price"] = series(10, lambda i: 300.0)
     srv.install(monkeypatch)
     assert main.run(cfg(pccExportLimitW=5000, essEffectiveEndCharge="endlow"), now=NOW) == 0
@@ -274,3 +274,96 @@ def test_ramp_penalty_defaults_to_0_0001(cfg, monkeypatch):
     monkeypatch.setattr(main.a5model, "build_model", lambda inp: seen.append(inp.ramp_penalty_eur_kw) or real_build(inp))
     assert main.run(cfg(), now=NOW) == 0
     assert seen == [0.0001]
+
+
+# --- SFU (docs/requirements-sfu-soc-fraction-usable-energy.md) AC1 a-d -------------------------------------------------
+
+SOC_REJECTED = [
+    ({"ess_min_soc": 15, "ess_max_soc": 80}, ["fractions", "ess_min_soc=15", "ess_max_soc=80", "use 0.15"]),
+    ({"ess_min_soc": 0.8, "ess_max_soc": 0.15}, ["fractions", "ess_min_soc=0.8", "ess_max_soc=0.15"]),
+    ({"ess_min_soc": -0.1, "ess_max_soc": 0.5}, ["fractions", "ess_min_soc=-0.1", "ess_max_soc=0.5"]),
+]
+
+
+@pytest.mark.parametrize("over,needles", SOC_REJECTED)
+def test_sfu_ac1a_percent_and_bad_fractions_are_rejected(cfg, monkeypatch, caplog, over, needles):
+    srv = FakeServer()
+    srv.install(monkeypatch)
+    assert main.run(cfg(**dict(BASE, **over)), now=NOW) == 1
+    assert srv.posted == []
+    assert "configuration error" in caplog.text
+    for n in needles:
+        assert n in caplog.text
+
+
+def test_sfu_ac1a_fractions_are_accepted(cfg, monkeypatch):
+    srv = FakeServer()
+    srv.install(monkeypatch)
+    assert main.run(cfg(**dict(BASE, ess_min_soc=0.15, ess_max_soc=0.80)), now=NOW) == 0
+
+
+def test_sfu_ac1b_model_bounds_are_capacity_times_fraction():
+    inp = a5model.PlanInputs(interval_s=900, load_kw=[1.0], pv_kw=[0.0], price_eur_mwh=[1.0], p_charge_kw=1.0,
+                             p_discharge_kw=1.0, capacity_kwh=350.0, e0_kwh=100.0, e_end_kwh=100.0,
+                             soc_min=0.15, soc_max=0.80, import_limit_kw=10.0, pcc_min_kw=0.0)
+    assert a5model.energy_bounds(inp) == pytest.approx((52.5, 280.0))
+
+
+@pytest.mark.parametrize("usable,total,warns", [(34.3, 86.8, False), (-5.0, 52.5, True), (300.0, 280.0, True)])
+def test_sfu_ac1c_usable_to_total(caplog, usable, total, warns):
+    assert main.usable_to_total(usable, 350.0, 0.15, 0.80, "ess_charge_dp_id") == pytest.approx(total, abs=0.01)
+    assert ("clamped" in caplog.text) == warns
+    if warns:
+        assert any(r.levelname == "WARNING" and f"{usable:.3f}" in r.getMessage() for r in caplog.records)
+
+
+def run_sfu(cfg, monkeypatch, charge_wh, end_wh=None):
+    srv = FakeServer()
+    srv.datapoints["cap"] = {"lastReadingValue": 350000.0}
+    srv.datapoints["charge"]["lastReadingValue"] = charge_wh
+    srv.datapoints["endc"] = {"lastReadingValue": end_wh}
+    srv.install(monkeypatch)
+    over = dict(ess_max_P_charge_dp_id=100000, ess_max_P_discharge_dp_id=100000, ess_max_E_dp_id="cap",
+                pccImportLimitW=500000, pccExportLimitW=-500000)
+    over["essEffectiveEndCharge"] = "endc" if end_wh is not None else None
+    captured = {}
+    real = a5model.build_model
+
+    def spy(inp):
+        captured["inp"] = inp
+        return real(inp)
+    monkeypatch.setattr(a5model, "build_model", spy)
+    assert main.run(cfg(**over), now=NOW) == 0
+    return srv, captured["inp"]
+
+
+def test_sfu_ac1c_end_target_converts_like_the_start(cfg, monkeypatch, caplog):
+    _, inp = run_sfu(cfg, monkeypatch, 34300.0, 100000.0)
+    assert inp.e0_kwh == pytest.approx(86.8, abs=0.01)
+    assert inp.e_end_kwh == pytest.approx(52.5 + 100.0, abs=0.01)
+    assert "clamped" not in caplog.text
+    _, inp = run_sfu(cfg, monkeypatch, 34300.0, -5000.0)
+    assert inp.e_end_kwh == pytest.approx(52.5, abs=0.01)
+    assert "essEffectiveEndCharge" in caplog.text and "clamped" in caplog.text
+
+
+def test_sfu_end_target_defaults_to_converted_start(cfg, monkeypatch):
+    _, inp = run_sfu(cfg, monkeypatch, 34300.0)
+    assert inp.e0_kwh == pytest.approx(86.8, abs=0.01) and inp.e_end_kwh == inp.e0_kwh
+
+
+def test_sfu_r4_resolved_inputs_line(cfg, monkeypatch, caplog):
+    caplog.set_level("INFO")
+    run_sfu(cfg, monkeypatch, 34300.0, 100000.0)
+    line = next(r.getMessage() for r in caplog.records if "ess_min_soc=0.15, ess_max_soc=0.8," in r.getMessage())
+    for part in ("capacity=350 kWh", "usable start=34.300 kWh -> total start=86.800 kWh",
+                 "usable end=100.000 kWh -> total end=152.500 kWh", "Pch=100 kW", "Pdis=100 kW", "PCC -500 .. 500 kW"):
+        assert part in line
+
+
+def test_sfu_ac1d_full_solve_keeps_energy_within_the_window(cfg, monkeypatch):
+    srv, inp = run_sfu(cfg, monkeypatch, 34300.0, 100000.0)
+    r = a5model.solve(a5model.build_model(inp), time_limit_s=60)
+    assert r.ok and len(srv.posted) == 1
+    assert all(52.5 - 1e-6 <= e <= 280.0 + 1e-6 for e in r.energy_kwh)
+    assert r.energy_kwh[0] == pytest.approx(86.8, abs=0.01)
